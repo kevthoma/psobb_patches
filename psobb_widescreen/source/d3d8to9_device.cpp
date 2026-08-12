@@ -322,6 +322,30 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, cons
 {
 	UNREFERENCED_PARAMETER(pDirtyRegion);
 
+	// HUD/text sharpen: the swap-chain backbuffer now holds the FINAL displayed image (world + HUD +
+	// text), so sharpening it here reaches everything on screen (unlike the scene pass). StretchRect
+	// the backbuffer to a temp (outside any scene), then draw the sharpen quad back onto it inside our
+	// own BeginScene/EndScene (Present runs outside the game's scene). Size-guarded to the backbuffer.
+	if (g_bHUDSharpen && sharpen && rgbaBuffer1Surf && rgbaBuffer1Tex) {
+		IDirect3DSurface9 *backBuf = nullptr;
+		if (SUCCEEDED(ProxyInterface->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuf)) && backBuf) {
+			D3DSURFACE_DESC bbDesc, bufDesc;
+			if (SUCCEEDED(backBuf->GetDesc(&bbDesc)) && SUCCEEDED(rgbaBuffer1Surf->GetDesc(&bufDesc)) &&
+			    bbDesc.Width == bufDesc.Width && bbDesc.Height == bufDesc.Height) {
+				if (SUCCEEDED(ProxyInterface->StretchRect(backBuf, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE))) {
+					IDirect3DSurface9 *prevRT = nullptr;
+					ProxyInterface->GetRenderTarget(0, &prevRT);
+					if (SUCCEEDED(ProxyInterface->BeginScene())) {
+						sharpen->go(rgbaBuffer1Tex, backBuf, g_fHUDSharpenStrength);
+						ProxyInterface->EndScene();
+					}
+					if (prevRT) { ProxyInterface->SetRenderTarget(0, prevRT); prevRT->Release(); }
+				}
+			}
+			backBuf->Release();
+		}
+	}
+
 	mrts = nrts;
 	nrts = 0;
 
@@ -830,23 +854,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::BeginScene()
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::EndScene()
 {
-	// HUD/text sharpen: runs on the FINAL composited frame (world + HUD + text) just before the
-	// scene is presented, so unlike the scene sharpen it reaches the 2D HUD/text overlay. We only
-	// touch the full-size backbuffer (size must match our helper RT) so offscreen/shadow passes with
-	// their own BeginScene/EndScene are skipped. The effect saves/restores device state itself.
-	if (g_bHUDSharpen && sharpen && rgbaBuffer1Surf && rgbaBuffer1Tex) {
-		IDirect3DSurface9 *backBuf = nullptr;
-		if (SUCCEEDED(ProxyInterface->GetRenderTarget(0, &backBuf)) && backBuf) {
-			D3DSURFACE_DESC rtDesc, bufDesc;
-			if (SUCCEEDED(backBuf->GetDesc(&rtDesc)) && SUCCEEDED(rgbaBuffer1Surf->GetDesc(&bufDesc)) &&
-			    rtDesc.Width == bufDesc.Width && rtDesc.Height == bufDesc.Height) {
-				if (SUCCEEDED(ProxyInterface->StretchRect(backBuf, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE))) {
-					sharpen->go(rgbaBuffer1Tex, backBuf, g_fHUDSharpenStrength);
-				}
-			}
-			backBuf->Release();
-		}
-	}
 	return ProxyInterface->EndScene();
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::Clear(DWORD Count, const D3DRECT *pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil)
