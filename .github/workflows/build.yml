@@ -23,10 +23,13 @@ jobs:
       # libs are vendored in source/dxsdk; d3d9.h/.lib come from the runner's Win10 SDK,
       # so no DirectX SDK install is needed (DXSDK_DIR can stay empty).
       - name: Build psobb_widescreen (Release|Win32)
+        # The vcxproj only selects v143 for VisualStudioVersion==17.0; the runner is now
+        # VS18, so it falls back to the default v141 (not installed) -> pin the toolset here.
         run: >
           msbuild psobb_widescreen\d3d8to9.vcxproj
           /p:Configuration=Release
           /p:Platform=Win32
+          /p:PlatformToolset=v143
           /p:WindowsTargetPlatformVersion=10.0
           /p:PostBuildEventUseInBuild=false
           /m /v:minimal
