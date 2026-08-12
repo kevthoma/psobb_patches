@@ -10,7 +10,6 @@
 using System;
 using System.Diagnostics;
 using System.Drawing;
-using System.Globalization;
 using System.IO;
 using System.Collections.Generic;
 using System.Net.Sockets;
@@ -35,7 +34,7 @@ namespace Corellia
         readonly string cfgPath;
 
         RadioButton rbFull, rbWin;
-        ComboBox cboRes, cboHud;
+        ComboBox cboRes;
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA;
 
         // Windowed sizes offered to players (widescreen first, then 4:3 legacy).
@@ -43,7 +42,6 @@ namespace Corellia
             "1280 x 720", "1366 x 768", "1600 x 900", "1920 x 1080", "2560 x 1440",
             "3840 x 2160", "1600 x 1200", "1280 x 960", "1024 x 768"
         };
-        static readonly string[] HudScales = { "0.75", "1.0", "1.25", "1.5", "2.0" };
 
         public MainForm()
         {
@@ -62,7 +60,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 366);
+            ClientSize = new Size(430, 322);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -94,13 +92,7 @@ namespace Corellia
             foreach (var c in new Control[] { cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA }) gFx.Controls.Add(c);
             Controls.Add(gFx);
 
-            var lblHud = new Label { Text = "HUD size:", Location = new Point(18, 268), AutoSize = true };
-            cboHud = new ComboBox { Location = new Point(90, 264), Size = new Size(80, 24), DropDownStyle = ComboBoxStyle.DropDownList };
-            cboHud.Items.AddRange(HudScales);
-            Controls.Add(lblHud);
-            Controls.Add(cboHud);
-
-            var btnPlay = new Button { Text = "Play", Location = new Point(150, 306), Size = new Size(130, 44) };
+            var btnPlay = new Button { Text = "Play", Location = new Point(150, 262), Size = new Size(130, 44) };
             btnPlay.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnPlay.Click += OnPlay;
             Controls.Add(btnPlay);
@@ -156,10 +148,6 @@ namespace Corellia
             cbDOF.Checked  = AsBool(d, "DOF", true);
             cbHDR.Checked  = AsBool(d, "HDR", true);
 
-            string hud = d.TryGetValue("HUDScale", out var hv) ? NormalizeHud(hv) : "1.0";
-            cboHud.SelectedIndex = Math.Max(0, Array.IndexOf(HudScales, hud));
-            if (cboHud.SelectedIndex < 0) cboHud.SelectedIndex = Array.IndexOf(HudScales, "1.0");
-
             int w = ParseInt(d, "WindowWidth", 1600);
             int h = ParseInt(d, "WindowHeight", 1200);
             string res = w + " x " + h;
@@ -171,13 +159,6 @@ namespace Corellia
             rbWin.Checked = windowed;
             rbFull.Checked = !windowed;
             cboRes.Enabled = windowed;
-        }
-
-        static string NormalizeHud(string v)
-        {
-            if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var f))
-                return f.ToString("0.0##", CultureInfo.InvariantCulture);
-            return "1.0";
         }
 
         static int ParseInt(Dictionary<string, string> d, string key, int dflt)
@@ -198,7 +179,9 @@ namespace Corellia
             SetKey(lines, "CelShader", cbCel.Checked ? "1" : "0");
             SetKey(lines, "DOF", cbDOF.Checked ? "1" : "0");
             SetKey(lines, "HDR", cbHDR.Checked ? "1" : "0");
-            SetKey(lines, "HUDScale", (string)cboHud.SelectedItem ?? "1.0");
+            // HUD scaling is entangled with the widescreen layout math in the wrapper (non-1.0
+            // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
+            SetKey(lines, "HUDScale", "1.0");
 
             SetKey(lines, "Windowed", rbWin.Checked ? "1" : "0");
             ParseRes((string)cboRes.SelectedItem, out int w, out int h);
