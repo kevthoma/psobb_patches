@@ -7,9 +7,6 @@
 #include "Sharpen.h"
 using namespace std;
 
-// Strength (0..1) from widescreen.cfg, defined in Options.c.
-extern "C" float g_fSharpenStrength;
-
 #ifndef V
 #define V(x) { hr = (x); }
 #endif
@@ -71,13 +68,13 @@ Sharpen::~Sharpen() {
     SAFE_RELEASE(vertexDeclaration);
 }
 
-void Sharpen::go(IDirect3DTexture9 *frame, IDirect3DSurface9 *dst) {
+void Sharpen::go(IDirect3DTexture9 *frame, IDirect3DSurface9 *dst, float strength) {
     HRESULT hr;
     V(device->SetVertexDeclaration(vertexDeclaration));
-    sharpenPass(frame, dst);
+    sharpenPass(frame, dst, strength);
 }
 
-void Sharpen::sharpenPass(IDirect3DTexture9* frame, IDirect3DSurface9 *dst) {
+void Sharpen::sharpenPass(IDirect3DTexture9* frame, IDirect3DSurface9 *dst, float strength) {
     D3DPERF_BeginEvent(D3DCOLOR_XRGB(0, 0, 0), L"Sharpen: 1st pass");
     HRESULT hr;
 
@@ -86,7 +83,7 @@ void Sharpen::sharpenPass(IDirect3DTexture9* frame, IDirect3DSurface9 *dst) {
 
     V(effect->SetTexture(frameTexHandle, frame));
     if (strengthHandle) {
-        V(effect->SetFloat(strengthHandle, g_fSharpenStrength));
+        V(effect->SetFloat(strengthHandle, strength));
     }
 
     UINT passes;

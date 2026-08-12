@@ -15,10 +15,10 @@ class Sharpen {
         Sharpen(IDirect3DDevice9 *device, int width, int height);
         ~Sharpen();
 
-        void go(IDirect3DTexture9 *frame, IDirect3DSurface9 *dst);
+        void go(IDirect3DTexture9 *frame, IDirect3DSurface9 *dst, float strength);
 
     private:
-        void sharpenPass(IDirect3DTexture9* frame, IDirect3DSurface9 *dst);
+        void sharpenPass(IDirect3DTexture9* frame, IDirect3DSurface9 *dst, float strength);
         void quad(int width, int height);
 
         IDirect3DDevice9 *device;

@@ -759,10 +759,10 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetRenderTarget(IDirect3DSurface8 *pR
 				tonemap->go(rgbaBuffer1Tex, pMainRenderTarget);
 			}
 
-			// Contrast-adaptive sharpen - last, so it crisps the final composited image (incl. HUD text)
-			if (g_bSharpen) {
+			// Scene sharpen - crisps the 3D world here (before the HUD/text overlay is drawn).
+			if (g_bSceneSharpen) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
-				sharpen->go(rgbaBuffer1Tex, pMainRenderTarget);
+				sharpen->go(rgbaBuffer1Tex, pMainRenderTarget, g_fSceneSharpenStrength);
 			}
 
 			RestoreRenderState();
@@ -830,6 +830,23 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::BeginScene()
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::EndScene()
 {
+	// HUD/text sharpen: runs on the FINAL composited frame (world + HUD + text) just before the
+	// scene is presented, so unlike the scene sharpen it reaches the 2D HUD/text overlay. We only
+	// touch the full-size backbuffer (size must match our helper RT) so offscreen/shadow passes with
+	// their own BeginScene/EndScene are skipped. The effect saves/restores device state itself.
+	if (g_bHUDSharpen && sharpen && rgbaBuffer1Surf && rgbaBuffer1Tex) {
+		IDirect3DSurface9 *backBuf = nullptr;
+		if (SUCCEEDED(ProxyInterface->GetRenderTarget(0, &backBuf)) && backBuf) {
+			D3DSURFACE_DESC rtDesc, bufDesc;
+			if (SUCCEEDED(backBuf->GetDesc(&rtDesc)) && SUCCEEDED(rgbaBuffer1Surf->GetDesc(&bufDesc)) &&
+			    rtDesc.Width == bufDesc.Width && rtDesc.Height == bufDesc.Height) {
+				if (SUCCEEDED(ProxyInterface->StretchRect(backBuf, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE))) {
+					sharpen->go(rgbaBuffer1Tex, backBuf, g_fHUDSharpenStrength);
+				}
+			}
+			backBuf->Release();
+		}
+	}
 	return ProxyInterface->EndScene();
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::Clear(DWORD Count, const D3DRECT *pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil)

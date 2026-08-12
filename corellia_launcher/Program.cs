@@ -34,8 +34,8 @@ namespace Corellia
         readonly string cfgPath;
 
         RadioButton rbFull, rbWin;
-        ComboBox cboRes, cboSharpen;
-        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSharpen;
+        ComboBox cboRes, cboSceneSharpen, cboHudSharpen;
+        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbHudSharpen;
 
         static readonly string[] SharpenStrengths = { "0.25", "0.40", "0.50", "0.65", "0.80", "1.0" };
 
@@ -62,7 +62,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 358);
+            ClientSize = new Size(430, 412);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -84,22 +84,32 @@ namespace Corellia
             rbWin.CheckedChanged += (s, e) => cboRes.Enabled = rbWin.Checked;
 
             // Effects
-            var gFx = new GroupBox { Text = "Effects", Location = new Point(16, 156), Size = new Size(398, 128) };
+            var gFx = new GroupBox { Text = "Effects", Location = new Point(16, 156), Size = new Size(398, 96) };
             cbSMAA = new CheckBox { Text = "SMAA (anti-alias)", Location = new Point(14, 26), AutoSize = true };
             cbSSAO = new CheckBox { Text = "SSAO", Location = new Point(160, 26), AutoSize = true };
             cbCel  = new CheckBox { Text = "Cel shading", Location = new Point(270, 26), AutoSize = true };
             cbDOF  = new CheckBox { Text = "Depth of field", Location = new Point(14, 58), AutoSize = true };
             cbHDR  = new CheckBox { Text = "HDR", Location = new Point(160, 58), AutoSize = true };
             cbMSAA = new CheckBox { Text = "MSAA", Location = new Point(270, 58), AutoSize = true };
-            cbSharpen = new CheckBox { Text = "Sharpen (text/HUD)", Location = new Point(14, 92), AutoSize = true };
-            var lblStr = new Label { Text = "Strength:", Location = new Point(190, 93), AutoSize = true };
-            cboSharpen = new ComboBox { Location = new Point(258, 89), Size = new Size(70, 24), DropDownStyle = ComboBoxStyle.DropDownList };
-            cboSharpen.Items.AddRange(SharpenStrengths);
-            foreach (var c in new Control[] { cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSharpen, lblStr, cboSharpen }) gFx.Controls.Add(c);
-            cbSharpen.CheckedChanged += (s, e) => cboSharpen.Enabled = cbSharpen.Checked;
+            foreach (var c in new Control[] { cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA }) gFx.Controls.Add(c);
             Controls.Add(gFx);
 
-            var btnPlay = new Button { Text = "Play", Location = new Point(150, 298), Size = new Size(130, 44) };
+            // Sharpening (post-process). Scene = 3D world only; HUD/text = the final image incl. UI.
+            var gSharp = new GroupBox { Text = "Sharpening", Location = new Point(16, 262), Size = new Size(398, 78) };
+            cbSceneSharpen = new CheckBox { Text = "3D scene", Location = new Point(14, 24), AutoSize = true };
+            var lblS1 = new Label { Text = "Strength:", Location = new Point(150, 25), AutoSize = true };
+            cboSceneSharpen = new ComboBox { Location = new Point(218, 21), Size = new Size(70, 24), DropDownStyle = ComboBoxStyle.DropDownList };
+            cboSceneSharpen.Items.AddRange(SharpenStrengths);
+            cbHudSharpen = new CheckBox { Text = "HUD / text", Location = new Point(14, 50), AutoSize = true };
+            var lblS2 = new Label { Text = "Strength:", Location = new Point(150, 51), AutoSize = true };
+            cboHudSharpen = new ComboBox { Location = new Point(218, 47), Size = new Size(70, 24), DropDownStyle = ComboBoxStyle.DropDownList };
+            cboHudSharpen.Items.AddRange(SharpenStrengths);
+            foreach (var c in new Control[] { cbSceneSharpen, lblS1, cboSceneSharpen, cbHudSharpen, lblS2, cboHudSharpen }) gSharp.Controls.Add(c);
+            cbSceneSharpen.CheckedChanged += (s, e) => cboSceneSharpen.Enabled = cbSceneSharpen.Checked;
+            cbHudSharpen.CheckedChanged += (s, e) => cboHudSharpen.Enabled = cbHudSharpen.Checked;
+            Controls.Add(gSharp);
+
+            var btnPlay = new Button { Text = "Play", Location = new Point(150, 352), Size = new Size(130, 44) };
             btnPlay.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnPlay.Click += OnPlay;
             Controls.Add(btnPlay);
@@ -154,13 +164,13 @@ namespace Corellia
             cbCel.Checked  = AsBool(d, "CelShader", true);
             cbDOF.Checked  = AsBool(d, "DOF", true);
             cbHDR.Checked  = AsBool(d, "HDR", true);
-            cbSharpen.Checked = AsBool(d, "Sharpen", true);
+            cbSceneSharpen.Checked = AsBool(d, "SceneSharpen", true);
+            SelectStrength(cboSceneSharpen, d.TryGetValue("SceneSharpenStrength", out var ss) ? ss.Trim() : "0.50");
+            cboSceneSharpen.Enabled = cbSceneSharpen.Checked;
 
-            string str = d.TryGetValue("SharpenStrength", out var sv) ? sv.Trim() : "0.50";
-            int si = Array.IndexOf(SharpenStrengths, str);
-            if (si < 0) { cboSharpen.Items.Add(str); si = cboSharpen.Items.Count - 1; }
-            cboSharpen.SelectedIndex = si;
-            cboSharpen.Enabled = cbSharpen.Checked;
+            cbHudSharpen.Checked = AsBool(d, "HUDSharpen", true);
+            SelectStrength(cboHudSharpen, d.TryGetValue("HUDSharpenStrength", out var hs) ? hs.Trim() : "0.50");
+            cboHudSharpen.Enabled = cbHudSharpen.Checked;
 
             int w = ParseInt(d, "WindowWidth", 1600);
             int h = ParseInt(d, "WindowHeight", 1200);
@@ -181,6 +191,13 @@ namespace Corellia
             return dflt;
         }
 
+        static void SelectStrength(ComboBox combo, string val)
+        {
+            int i = combo.Items.IndexOf(val);
+            if (i < 0) { combo.Items.Add(val); i = combo.Items.Count - 1; }
+            combo.SelectedIndex = i;
+        }
+
         void SaveConfig()
         {
             var lines = File.Exists(cfgPath)
@@ -193,8 +210,10 @@ namespace Corellia
             SetKey(lines, "CelShader", cbCel.Checked ? "1" : "0");
             SetKey(lines, "DOF", cbDOF.Checked ? "1" : "0");
             SetKey(lines, "HDR", cbHDR.Checked ? "1" : "0");
-            SetKey(lines, "Sharpen", cbSharpen.Checked ? "1" : "0");
-            SetKey(lines, "SharpenStrength", (string)cboSharpen.SelectedItem ?? "0.50");
+            SetKey(lines, "SceneSharpen", cbSceneSharpen.Checked ? "1" : "0");
+            SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.50");
+            SetKey(lines, "HUDSharpen", cbHudSharpen.Checked ? "1" : "0");
+            SetKey(lines, "HUDSharpenStrength", (string)cboHudSharpen.SelectedItem ?? "0.50");
             // HUD scaling is entangled with the widescreen layout math in the wrapper (non-1.0
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
             SetKey(lines, "HUDScale", "1.0");
