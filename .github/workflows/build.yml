@@ -18,6 +18,21 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
+      # The .fx effects are compiled at RUNTIME by D3DX (so a bad shader only fails in-game).
+      # Validate them here with fxc so HLSL errors fail the build instead. CelShader is a
+      # known-good control; Sharpen is ours. (Each guards PIXEL_SIZE with an #ifndef fallback.)
+      - name: Validate HLSL effects (fxc)
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\fxc.exe" -ErrorAction Stop |
+                 Sort-Object FullName | Select-Object -Last 1
+          Write-Host "fxc: $($fxc.FullName)"
+          foreach ($f in @("CelShader.fx","Sharpen.fx")) {
+            Write-Host "--- fxc $f ---"
+            & $fxc.FullName /nologo /Tfx_2_0 "psobb_widescreen\res\$f" /Fo "$env:TEMP\$f.fxo"
+            if ($LASTEXITCODE -ne 0) { throw "fxc validation failed for $f" }
+          }
+
       # The vcxproj pins WindowsTargetPlatformVersion=7.0 (legacy) and has a post-build
       # step that copies to a local absolute path — override both for CI. D3DX9 headers/
       # libs are vendored in source/dxsdk; d3d9.h/.lib come from the runner's Win10 SDK,
