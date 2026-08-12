@@ -9,6 +9,9 @@
 #include <stdlib.h>
 
 extern float g_fHUDScale;
+extern BOOL g_bWindowed;
+extern int g_iWindowWidth;
+extern int g_iWindowHeight;
 
 ULONG listHUDWidth[] = {
   0x004011D2,
@@ -505,16 +508,26 @@ ULONG listVerticalCenterAlignItems[] = {
 };
 
 RECT rectMon;
+RECT g_windowRect;      // outer window rect (windowed mode), computed in patch_widescreen
+DWORD g_windowStyle;    // window style (windowed mode)
 
 HWND __stdcall myCreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y,
                                  int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam) {
-  X = rectMon.left;
-  Y = rectMon.top;
-  nWidth = rectMon.right - rectMon.left;
-  nHeight = rectMon.bottom - rectMon.top;
-
-  dwStyle = WS_POPUP;
-  dwExStyle = WS_EX_APPWINDOW;
+  if (g_bWindowed) {
+    X = g_windowRect.left;
+    Y = g_windowRect.top;
+    nWidth = g_windowRect.right - g_windowRect.left;
+    nHeight = g_windowRect.bottom - g_windowRect.top;
+    dwStyle = g_windowStyle;
+    dwExStyle = WS_EX_APPWINDOW;
+  } else {
+    X = rectMon.left;
+    Y = rectMon.top;
+    nWidth = rectMon.right - rectMon.left;
+    nHeight = rectMon.bottom - rectMon.top;
+    dwStyle = WS_POPUP;
+    dwExStyle = WS_EX_APPWINDOW;
+  }
   HWND hWnd = CreateWindowExA(dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam);
   //SetWindowPos(hWnd, HWND_NOTOPMOST, X, Y, nWidth, nHeight, SWP_SHOWWINDOW);
   return hWnd;
@@ -555,6 +568,41 @@ void patch_widescreen(void) {
   info.cbSize = sizeof(MONITORINFO);
   GetMonitorInfoA(monitor, &info);
   memcpy(&rectMon, &info.rcMonitor, sizeof(RECT));
+
+  if (g_bWindowed) {
+    // Windowed mode: render at the configured client size and drive ALL the widescreen HUD /
+    // backbuffer math off it (below), then build a normal titled window centered on the monitor
+    // instead of the borderless-fullscreen popup. The wrapper stays loaded, so the ASI patches
+    // (largeassets/HD, moresaveslots, bettersleep) keep working in windowed mode too.
+    int mw = rectMon.right - rectMon.left;
+    int mh = rectMon.bottom - rectMon.top;
+    int cw = g_iWindowWidth;
+    int ch = g_iWindowHeight;
+    if (cw < 320) cw = 320;
+    if (ch < 240) ch = 240;
+    if (cw > mw) cw = mw;
+    if (ch > mh) ch = mh;
+
+    g_windowStyle = WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX); // fixed-size, titled
+    RECT wr = { 0, 0, cw, ch };
+    AdjustWindowRectEx(&wr, g_windowStyle, FALSE, WS_EX_APPWINDOW);
+    int ow = wr.right - wr.left;
+    int oh = wr.bottom - wr.top;
+    int ox = rectMon.left + (mw - ow) / 2;
+    int oy = rectMon.top + (mh - oh) / 2;
+    if (ox < rectMon.left) ox = rectMon.left;
+    if (oy < rectMon.top) oy = rectMon.top;
+    g_windowRect.left = ox;
+    g_windowRect.top = oy;
+    g_windowRect.right = ox + ow;
+    g_windowRect.bottom = oy + oh;
+
+    // From here on rectMon = the client/render rect, so the widescreen math targets the window.
+    rectMon.left = 0;
+    rectMon.top = 0;
+    rectMon.right = cw;
+    rectMon.bottom = ch;
+  }
 
   memset((void*)0x00482E20, 0x90, 52); // WINDOW_MODE = 1
   *(ULONG_PTR*)0x0082D1D8 = (ULONG_PTR)&pmyCreateWindowExA;

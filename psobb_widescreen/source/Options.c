@@ -15,7 +15,10 @@ static const char default_config[] =
 "CelShader=1\r\n"
 "DOF=1\r\n"
 "HDR=1\r\n"
-"HUDScale=1.0\r\n";
+"HUDScale=1.0\r\n"
+"Windowed=0\r\n"
+"WindowWidth=1600\r\n"
+"WindowHeight=1200\r\n";
 
 BOOL g_bMSAA = 1;
 BOOL g_bSMAA = 1;
@@ -24,6 +27,9 @@ BOOL g_bCelShader = 1;
 BOOL g_bDOF = 1;
 BOOL g_bHDR = 1;
 float g_fHUDScale = 1.0f;
+BOOL g_bWindowed = 0;
+int g_iWindowWidth = 1600;
+int g_iWindowHeight = 1200;
 
 static void write_default_config(const char* path) {
   HANDLE hFile = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, CREATE_ALWAYS, 0, 0);
@@ -116,6 +122,26 @@ static BOOL parse_option_float(char* ptr, const char* option, float* out) {
   return 0;
 }
 
+// positive integers only
+static BOOL parse_option_int(char* ptr, const char* option, int* out) {
+  char* p = ptr;
+  if (__stristr(p, option)) {
+    while (*p && *p != '=') p++;
+    if (*p == '=') {
+      p++;
+      while (*p && (*p == ' ' || *p == '\t')) p++;
+      if (*p) {
+        int v = atoi(p);
+        if (v > 0) {
+          *out = v;
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}
+
 static void parse_line(char* line) {
   char* p = line;
   while (*p && (*p == ' ' || *p == '\t')) p++;
@@ -127,6 +153,9 @@ static void parse_line(char* line) {
   if (parse_option_bool(p, "dof", &g_bDOF)) return;
   if (parse_option_bool(p, "hdr", &g_bHDR)) return;
   if (parse_option_float(p, "hudscale", &g_fHUDScale)) return;
+  if (parse_option_int(p, "windowwidth", &g_iWindowWidth)) return;
+  if (parse_option_int(p, "windowheight", &g_iWindowHeight)) return;
+  if (parse_option_bool(p, "windowed", &g_bWindowed)) return;
 }
 
 static void load_config(void) {
