@@ -35,7 +35,7 @@ namespace Corellia
 
         RadioButton rbFull, rbWin;
         ComboBox cboRes, cboSceneSharpen;
-        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen;
+        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController;
 
         static readonly string[] SharpenStrengths = { "0.25", "0.40", "0.50", "0.65", "0.80", "1.0" };
 
@@ -62,7 +62,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 388);
+            ClientSize = new Size(430, 416);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -104,7 +104,12 @@ namespace Corellia
             cbSceneSharpen.CheckedChanged += (s, e) => cboSceneSharpen.Enabled = cbSceneSharpen.Checked;
             Controls.Add(gSharp);
 
-            var btnPlay = new Button { Text = "Play", Location = new Point(150, 328), Size = new Size(130, 44) };
+            // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
+            // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
+            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 326), AutoSize = true };
+            Controls.Add(cbController);
+
+            var btnPlay = new Button { Text = "Play", Location = new Point(150, 356), Size = new Size(130, 44) };
             btnPlay.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnPlay.Click += OnPlay;
             Controls.Add(btnPlay);
@@ -163,6 +168,8 @@ namespace Corellia
             SelectStrength(cboSceneSharpen, d.TryGetValue("SceneSharpenStrength", out var ss) ? ss.Trim() : "0.50");
             cboSceneSharpen.Enabled = cbSceneSharpen.Checked;
 
+            cbController.Checked = AsBool(d, "ControllerPrompts", true);
+
             int w = ParseInt(d, "WindowWidth", 1600);
             int h = ParseInt(d, "WindowHeight", 1200);
             string res = w + " x " + h;
@@ -203,6 +210,7 @@ namespace Corellia
             SetKey(lines, "HDR", cbHDR.Checked ? "1" : "0");
             SetKey(lines, "SceneSharpen", cbSceneSharpen.Checked ? "1" : "0");
             SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.50");
+            SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
             // HUD scaling is entangled with the widescreen layout math in the wrapper (non-1.0
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
             SetKey(lines, "HUDScale", "1.0");
@@ -249,6 +257,8 @@ namespace Corellia
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
+            ApplyControllerPrompts();
+
             ReadServer(out string host, out int port);
             EnableTailscaleRoutes();
             if (!IsReachable(host, port, 1500))
@@ -286,6 +296,20 @@ namespace Corellia
                 MessageBox.Show(this, "Couldn't launch the game:\n" + ex.Message, "Corellia",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        // Swap the active HUD button-prompt texture (data/f256_hyouji.prs) to the keyboard or
+        // controller variant kept in ui_variants/. Idempotent; no-op if the variants aren't present.
+        void ApplyControllerPrompts()
+        {
+            try
+            {
+                string src = Path.Combine(dir, "ui_variants",
+                    cbController.Checked ? "f256_hyouji.controller.prs" : "f256_hyouji.keyboard.prs");
+                string dst = Path.Combine(dir, "data", "f256_hyouji.prs");
+                if (File.Exists(src) && File.Exists(dst)) File.Copy(src, dst, true);
+            }
+            catch { /* non-fatal: fall back to whatever's already in data/ */ }
         }
 
         void ReadServer(out string host, out int port)
