@@ -37,9 +37,12 @@ jobs:
       - name: Show build output
         run: dir psobb_widescreen\bin\Release
 
-      - name: Upload d3d8.dll
+      - name: Upload d3d8.dll (+ symbols)
         uses: actions/upload-artifact@v4
         with:
           name: d3d8-widescreen-Release-Win32
-          path: psobb_widescreen/bin/Release/d3d8.dll
+          path: |
+            psobb_widescreen/bin/Release/d3d8.dll
+            psobb_widescreen/bin/Release/d3d8.pdb
+            psobb_widescreen/bin/Release/d3d8.map
           if-no-files-found: error
