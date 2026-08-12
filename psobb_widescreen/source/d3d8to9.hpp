@@ -37,8 +37,6 @@ extern "C" BOOL g_bDOF;
 extern "C" BOOL g_bHDR;
 extern "C" BOOL g_bSceneSharpen;
 extern "C" float g_fSceneSharpenStrength;
-extern "C" BOOL g_bHUDSharpen;
-extern "C" float g_fHUDSharpenStrength;
 
 class Direct3D8 : public IDirect3D8
 {

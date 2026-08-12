@@ -322,30 +322,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, cons
 {
 	UNREFERENCED_PARAMETER(pDirtyRegion);
 
-	// HUD/text sharpen: the swap-chain backbuffer now holds the FINAL displayed image (world + HUD +
-	// text), so sharpening it here reaches everything on screen (unlike the scene pass). StretchRect
-	// the backbuffer to a temp (outside any scene), then draw the sharpen quad back onto it inside our
-	// own BeginScene/EndScene (Present runs outside the game's scene). Size-guarded to the backbuffer.
-	if (g_bHUDSharpen && sharpen && rgbaBuffer1Surf && rgbaBuffer1Tex) {
-		IDirect3DSurface9 *backBuf = nullptr;
-		if (SUCCEEDED(ProxyInterface->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuf)) && backBuf) {
-			D3DSURFACE_DESC bbDesc, bufDesc;
-			if (SUCCEEDED(backBuf->GetDesc(&bbDesc)) && SUCCEEDED(rgbaBuffer1Surf->GetDesc(&bufDesc)) &&
-			    bbDesc.Width == bufDesc.Width && bbDesc.Height == bufDesc.Height) {
-				if (SUCCEEDED(ProxyInterface->StretchRect(backBuf, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE))) {
-					IDirect3DSurface9 *prevRT = nullptr;
-					ProxyInterface->GetRenderTarget(0, &prevRT);
-					if (SUCCEEDED(ProxyInterface->BeginScene())) {
-						sharpen->go(rgbaBuffer1Tex, backBuf, g_fHUDSharpenStrength);
-						ProxyInterface->EndScene();
-					}
-					if (prevRT) { ProxyInterface->SetRenderTarget(0, prevRT); prevRT->Release(); }
-				}
-			}
-			backBuf->Release();
-		}
-	}
-
 	mrts = nrts;
 	nrts = 0;
 
