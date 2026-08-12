@@ -46,3 +46,23 @@ jobs:
             psobb_widescreen/bin/Release/d3d8.pdb
             psobb_widescreen/bin/Release/d3d8.map
           if-no-files-found: error
+
+  launcher:
+    # Corellia launcher + options app (WinForms, .NET Framework 4.8 -> no runtime install
+    # for players). Writes the wrapper's widescreen.cfg; replaces the old .vbs/.ps1 launcher.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Corellia launcher (Release, net48)
+        run: dotnet build corellia_launcher/CorelliaLauncher.csproj -c Release -o corellia_launcher/out
+
+      - name: Show build output
+        run: dir corellia_launcher\out
+
+      - name: Upload Corellia.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Corellia-launcher
+          path: corellia_launcher/out/Corellia.exe
+          if-no-files-found: error

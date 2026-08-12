@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Corellia launcher + display/effects options. WinForms on .NET Framework 4.8 so the
+       shipped exe needs NO runtime install (4.8 is in-box on Windows 10/11). Writes the
+       wrapper's widescreen.cfg; launches the game. Corellia-specific tooling co-located in
+       the psobb_patches fork for convenience. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>Corellia</AssemblyName>
+    <RootNamespace>Corellia</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+</Project>
