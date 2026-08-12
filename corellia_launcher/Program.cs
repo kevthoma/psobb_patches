@@ -127,6 +127,20 @@ namespace Corellia
                 catch { return false; }
             }
         }
+
+        // Re-open the PSO launcher after the options menu closes. online_e.exe hands off to the Option
+        // tool (and exits), so we bring it back; skipped if it's somehow still running (no duplicate).
+        public static void RelaunchOnline(string dir)
+        {
+            try
+            {
+                if (Process.GetProcessesByName("online_e").Length > 0) return;
+                var exe = Path.Combine(dir, "online_e.exe");
+                if (File.Exists(exe))
+                    Process.Start(new ProcessStartInfo { FileName = exe, WorkingDirectory = dir, UseShellExecute = true });
+            }
+            catch { }
+        }
     }
 
     // ---- Launcher role (no window) --------------------------------------------------
@@ -406,6 +420,8 @@ namespace Corellia
             }
             // Apply the controller-prompt texture now so it takes effect for this session's launch too.
             Helpers.ApplyControllerPrompts(dir, cbController.Checked);
+            // Return to the PSO launcher (online_e.exe hands off to Option and exits).
+            Helpers.RelaunchOnline(dir);
             Close();
         }
     }
