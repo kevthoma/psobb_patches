@@ -25,6 +25,7 @@
 #include "dof/DOF.h"
 #include "tonemap/HDRToneMap.h"
 #include "celshader/CelShader.h"
+#include "sharpen/Sharpen.h"
 #include "DepthTexture.hpp"
 
 extern HMODULE g_hModule;
@@ -34,6 +35,8 @@ extern "C" BOOL g_bSSAO;
 extern "C" BOOL g_bCelShader;
 extern "C" BOOL g_bDOF;
 extern "C" BOOL g_bHDR;
+extern "C" BOOL g_bSharpen;
+extern "C" float g_fSharpenStrength;
 
 class Direct3D8 : public IDirect3D8
 {
@@ -215,6 +218,7 @@ private:
 	DOF *dof = nullptr;
 	HDRToneMap *tonemap = nullptr;
 	CelShader *celshader = nullptr;
+	Sharpen *sharpen = nullptr;
 
 	DepthTexture*	depthTexture = nullptr;
 

@@ -72,7 +72,7 @@ BEGIN
             VALUE "CompanyName", "crosire"
             VALUE "FileDescription", "d3d8to9"
             VALUE "FileVersion", "1.13.0.0"
-            VALUE "LegalCopyright", "Copyright © 2015. All rights reserved."
+            VALUE "LegalCopyright", "Copyright ï¿½ 2015. All rights reserved."
             VALUE "OriginalFilename", "d3d8.dll"
             VALUE "ProductName", "ReShade"
             VALUE "ProductVersion", "3.0.0"
@@ -115,6 +115,8 @@ HDRTONEMAP.FX           RCDATA                  "HDRToneMap.fx"
 CELSHADER.FX            RCDATA                  "CelShader.fx"
 
 DOF.FX                  RCDATA                  "DOF.fx"
+
+SHARPEN.FX              RCDATA                  "Sharpen.fx"
 
 #endif    // English (United States) resources
 /////////////////////////////////////////////////////////////////////////////

@@ -45,6 +45,7 @@ Direct3DDevice8::Direct3DDevice8(Direct3D8 *d3d, IDirect3DDevice9 *ProxyInterfac
 	smaa = new SMAA(ProxyInterface, PresentParams->BackBufferWidth, PresentParams->BackBufferHeight, SMAA::PRESET_HIGH);
 	tonemap = new HDRToneMap(ProxyInterface, PresentParams->BackBufferWidth, PresentParams->BackBufferHeight);
 	celshader = new CelShader(ProxyInterface, PresentParams->BackBufferWidth, PresentParams->BackBufferHeight);
+	sharpen = new Sharpen(ProxyInterface, PresentParams->BackBufferWidth, PresentParams->BackBufferHeight);
 
 	if (MSAA != D3DMULTISAMPLE_NONE) {
 		ProxyInterface->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
@@ -123,6 +124,7 @@ ULONG STDMETHODCALLTYPE Direct3DDevice8::Release()
 	SAFE_DELETE(ssao);
 	SAFE_DELETE(tonemap);
 	SAFE_DELETE(celshader);
+	SAFE_DELETE(sharpen);
 	SAFE_DELETE(dof);
 	SAFE_DELETE(depthTexture);
 
@@ -280,6 +282,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 	SAFE_DELETE(ssao);
 	SAFE_DELETE(tonemap);
 	SAFE_DELETE(celshader);
+	SAFE_DELETE(sharpen);
 	SAFE_DELETE(dof);
 	SAFE_DELETE(depthTexture);
 
@@ -302,6 +305,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 		smaa = new SMAA(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight, SMAA::PRESET_HIGH);
 		tonemap = new HDRToneMap(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
 		celshader = new CelShader(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
+		sharpen = new Sharpen(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
 
 		if (MSAA != D3DMULTISAMPLE_NONE) {
 			ProxyInterface->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
@@ -753,6 +757,12 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetRenderTarget(IDirect3DSurface8 *pR
 			if (g_bHDR) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
 				tonemap->go(rgbaBuffer1Tex, pMainRenderTarget);
+			}
+
+			// Contrast-adaptive sharpen - last, so it crisps the final composited image (incl. HUD text)
+			if (g_bSharpen) {
+				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
+				sharpen->go(rgbaBuffer1Tex, pMainRenderTarget);
 			}
 
 			RestoreRenderState();

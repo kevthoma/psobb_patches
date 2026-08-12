@@ -15,6 +15,8 @@ static const char default_config[] =
 "CelShader=1\r\n"
 "DOF=1\r\n"
 "HDR=1\r\n"
+"Sharpen=1\r\n"
+"SharpenStrength=0.5\r\n"
 "HUDScale=1.0\r\n"
 "Windowed=0\r\n"
 "WindowWidth=1600\r\n"
@@ -26,6 +28,8 @@ BOOL g_bSSAO = 1;
 BOOL g_bCelShader = 1;
 BOOL g_bDOF = 1;
 BOOL g_bHDR = 1;
+BOOL g_bSharpen = 1;
+float g_fSharpenStrength = 0.5f;
 float g_fHUDScale = 1.0f;
 BOOL g_bWindowed = 0;
 int g_iWindowWidth = 1600;
@@ -152,6 +156,8 @@ static void parse_line(char* line) {
   if (parse_option_bool(p, "celshader", &g_bCelShader)) return;
   if (parse_option_bool(p, "dof", &g_bDOF)) return;
   if (parse_option_bool(p, "hdr", &g_bHDR)) return;
+  if (parse_option_float(p, "sharpenstrength", &g_fSharpenStrength)) return;
+  if (parse_option_bool(p, "sharpen", &g_bSharpen)) return;
   if (parse_option_float(p, "hudscale", &g_fHUDScale)) return;
   if (parse_option_int(p, "windowwidth", &g_iWindowWidth)) return;
   if (parse_option_int(p, "windowheight", &g_iWindowHeight)) return;

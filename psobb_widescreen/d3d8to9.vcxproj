@@ -114,6 +114,7 @@
     <ClCompile Include="source\interface_query.cpp" />
     <ClCompile Include="source\Options.c" />
     <ClCompile Include="source\smaa\SMAA.cpp" />
+    <ClCompile Include="source\sharpen\Sharpen.cpp" />
     <ClCompile Include="source\ssao\SSAO.cpp" />
     <ClCompile Include="source\tonemap\HDRToneMap.cpp" />
     <ClCompile Include="source\WideScreen.c" />
