@@ -1,11 +1,14 @@
-// Corellia launcher + options.
+// Corellia launcher + options — one binary, two roles chosen by its own filename:
 //
-// Replaces the old "Launch Corellia.vbs" + "corellia_prompt.ps1" (kills the VBScript
-// deprecation warning and the PowerShell console flash). A small WinForms window lets the
-// player pick display mode + windowed resolution + post-processing effects + HUD scale, all
-// of which are written to the widescreen wrapper's config (widescreen.cfg). Because the
-// wrapper (d3d8.dll) stays loaded in both modes, largeassets/HD keep working in windowed
-// mode too. On Play it runs the Tailscale reachability preflight, then launches the game.
+//   * Corellia.exe            -> LAUNCHER: runs the Tailscale reachability preflight, applies the
+//                               controller-prompt texture per the saved setting, then opens online_e.exe
+//                               (the PSO launcher). No settings window.
+//   * option_e_corellia.exe   -> OPTIONS MENU: the settings window (Display / Effects / Sharpening /
+//                               Controller prompts) with a "Save & Close" button. This is what the PSO
+//                               launcher's "Option" button opens (online_e.exe is patched to point at it).
+//
+// All settings are written to the widescreen wrapper's config (widescreen.cfg); the wrapper reads it when
+// the game starts. Replaces the old Launch Corellia.vbs + corellia_prompt.ps1 (no VBScript, no console flash).
 
 using System;
 using System.Diagnostics;
@@ -24,10 +27,155 @@ namespace Corellia
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+
+            string name = "";
+            try { name = Path.GetFileNameWithoutExtension(Application.ExecutablePath) ?? ""; }
+            catch { }
+
+            if (name.StartsWith("option", StringComparison.OrdinalIgnoreCase))
+                Application.Run(new MainForm());   // options menu (Save & Close)
+            else
+                Launcher.Run();                    // preflight + apply prompts + launch, no window
         }
     }
 
+    // ---- Shared helpers -------------------------------------------------------------
+    static class Helpers
+    {
+        // Swap the active HUD button-prompt texture (data/f256_hyouji.prs) to the keyboard or controller
+        // variant kept in ui_variants/. Idempotent; no-op if the variants aren't present.
+        public static void ApplyControllerPrompts(string dir, bool controller)
+        {
+            try
+            {
+                string src = Path.Combine(dir, "ui_variants",
+                    controller ? "f256_hyouji.controller.prs" : "f256_hyouji.keyboard.prs");
+                string dst = Path.Combine(dir, "data", "f256_hyouji.prs");
+                if (File.Exists(src) && File.Exists(dst)) File.Copy(src, dst, true);
+            }
+            catch { /* non-fatal: fall back to whatever's already in data/ */ }
+        }
+
+        // Read a bool key from widescreen.cfg (used by the launcher, which has no UI).
+        public static bool ReadCfgBool(string dir, string key, bool dflt)
+        {
+            try
+            {
+                var p = Path.Combine(dir, "widescreen.cfg");
+                if (!File.Exists(p)) return dflt;
+                foreach (var raw in File.ReadAllLines(p))
+                {
+                    var line = raw.Trim();
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    if (!line.Substring(0, eq).Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
+                    var v = line.Substring(eq + 1).Trim().ToLowerInvariant();
+                    if (v.StartsWith("on") || v.StartsWith("true") || v.StartsWith("1")) return true;
+                    if (v.StartsWith("off") || v.StartsWith("false") || v.StartsWith("0")) return false;
+                }
+            }
+            catch { }
+            return dflt;
+        }
+
+        public static void ReadServer(string dir, out string host, out int port)
+        {
+            host = "192.168.1.15"; port = 11000;
+            var p = Path.Combine(dir, "psobb.cfg");
+            if (!File.Exists(p)) return;
+            foreach (var raw in File.ReadAllLines(p))
+            {
+                var line = raw.Trim();
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                var k = line.Substring(0, eq).Trim();
+                var v = line.Substring(eq + 1).Trim();
+                if (k.Equals("PatchHost", StringComparison.OrdinalIgnoreCase) && v.Length > 0) host = v;
+                else if (k.Equals("PatchPort", StringComparison.OrdinalIgnoreCase) && int.TryParse(v, out var pp)) port = pp;
+            }
+        }
+
+        public static void EnableTailscaleRoutes()
+        {
+            try
+            {
+                string ts = "tailscale.exe";
+                var pf = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe");
+                if (File.Exists(pf)) ts = pf;
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ts,
+                    Arguments = "set --accept-routes=true",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                var proc = Process.Start(psi);
+                if (proc != null) proc.WaitForExit(4000);
+            }
+            catch { /* best-effort; not fatal on the LAN */ }
+        }
+
+        public static bool IsReachable(string host, int port, int timeoutMs)
+        {
+            using (var client = new TcpClient())
+            {
+                try
+                {
+                    var iar = client.BeginConnect(host, port, null, null);
+                    return iar.AsyncWaitHandle.WaitOne(timeoutMs) && client.Connected;
+                }
+                catch { return false; }
+            }
+        }
+    }
+
+    // ---- Launcher role (no window) --------------------------------------------------
+    static class Launcher
+    {
+        public static void Run()
+        {
+            string dir = AppDomain.CurrentDomain.BaseDirectory;
+
+            // Apply the controller-prompt texture (from the saved setting) before the game starts.
+            Helpers.ApplyControllerPrompts(dir, Helpers.ReadCfgBool(dir, "ControllerPrompts", true));
+
+            Helpers.ReadServer(dir, out string host, out int port);
+            Helpers.EnableTailscaleRoutes();
+            if (!Helpers.IsReachable(host, port, 1500))
+            {
+                System.Threading.Thread.Sleep(800); // let freshly-accepted routes come up
+                while (!Helpers.IsReachable(host, port, 1500))
+                {
+                    var msg =
+                        "Can't reach the Corellia server (" + host + ") yet.\n\n" +
+                        "1. Open Tailscale and make sure it's connected.\n" +
+                        "2. Right-click the Tailscale tray icon and enable\n" +
+                        "   'Use Tailscale subnet routes'.\n\n" +
+                        "Then click Retry.";
+                    var r = MessageBox.Show(msg, "Corellia - not connected yet",
+                        MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning);
+                    if (r != DialogResult.Retry) return; // Cancel = don't launch
+                    Helpers.EnableTailscaleRoutes();
+                }
+            }
+
+            var exe = Path.Combine(dir, "online_e.exe");
+            if (!File.Exists(exe))
+            {
+                MessageBox.Show("online_e.exe not found next to the launcher.", "Corellia",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            try { Process.Start(new ProcessStartInfo { FileName = exe, WorkingDirectory = dir, UseShellExecute = true }); }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Couldn't launch the game:\n" + ex.Message, "Corellia",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+
+    // ---- Options menu (window) ------------------------------------------------------
     class MainForm : Form
     {
         readonly string dir;
@@ -57,7 +205,7 @@ namespace Corellia
         // ---- UI ----------------------------------------------------------------
         void BuildUI()
         {
-            Text = "Corellia";
+            Text = "Corellia - Options";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
@@ -66,7 +214,7 @@ namespace Corellia
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
-                Text = "Corellia", AutoSize = true, Location = new Point(16, 12),
+                Text = "Corellia Options", AutoSize = true, Location = new Point(16, 12),
                 Font = new Font("Segoe UI", 15f, FontStyle.Bold)
             };
             Controls.Add(title);
@@ -109,11 +257,11 @@ namespace Corellia
             cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 326), AutoSize = true };
             Controls.Add(cbController);
 
-            var btnPlay = new Button { Text = "Play", Location = new Point(150, 356), Size = new Size(130, 44) };
-            btnPlay.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
-            btnPlay.Click += OnPlay;
-            Controls.Add(btnPlay);
-            AcceptButton = btnPlay;
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 356), Size = new Size(130, 44) };
+            btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
+            btnSave.Click += OnSaveClose;
+            Controls.Add(btnSave);
+            AcceptButton = btnSave;
         }
 
         void TryLoadIcon()
@@ -247,8 +395,8 @@ namespace Corellia
             { w = pw; h = ph; }
         }
 
-        // ---- Play / preflight --------------------------------------------------
-        void OnPlay(object sender, EventArgs e)
+        // ---- Save & Close ------------------------------------------------------
+        void OnSaveClose(object sender, EventArgs e)
         {
             try { SaveConfig(); }
             catch (Exception ex)
@@ -256,110 +404,9 @@ namespace Corellia
                 MessageBox.Show(this, "Couldn't save settings:\n" + ex.Message, "Corellia",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
-
-            ApplyControllerPrompts();
-
-            ReadServer(out string host, out int port);
-            EnableTailscaleRoutes();
-            if (!IsReachable(host, port, 1500))
-            {
-                System.Threading.Thread.Sleep(800); // let freshly-accepted routes come up
-                while (!IsReachable(host, port, 1500))
-                {
-                    var msg =
-                        "Can't reach the Corellia server (" + host + ") yet.\n\n" +
-                        "1. Open Tailscale and make sure it's connected.\n" +
-                        "2. Right-click the Tailscale tray icon and enable\n" +
-                        "   'Use Tailscale subnet routes'.\n\n" +
-                        "Then click Retry.";
-                    var r = MessageBox.Show(this, msg, "Corellia - not connected yet",
-                        MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning);
-                    if (r != DialogResult.Retry) return; // Cancel = don't launch
-                    EnableTailscaleRoutes();
-                }
-            }
-
-            var exe = Path.Combine(dir, "online_e.exe");
-            if (!File.Exists(exe))
-            {
-                MessageBox.Show(this, "online_e.exe not found next to the launcher.", "Corellia",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            try
-            {
-                Process.Start(new ProcessStartInfo { FileName = exe, WorkingDirectory = dir, UseShellExecute = true });
-                Close();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, "Couldn't launch the game:\n" + ex.Message, "Corellia",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        // Swap the active HUD button-prompt texture (data/f256_hyouji.prs) to the keyboard or
-        // controller variant kept in ui_variants/. Idempotent; no-op if the variants aren't present.
-        void ApplyControllerPrompts()
-        {
-            try
-            {
-                string src = Path.Combine(dir, "ui_variants",
-                    cbController.Checked ? "f256_hyouji.controller.prs" : "f256_hyouji.keyboard.prs");
-                string dst = Path.Combine(dir, "data", "f256_hyouji.prs");
-                if (File.Exists(src) && File.Exists(dst)) File.Copy(src, dst, true);
-            }
-            catch { /* non-fatal: fall back to whatever's already in data/ */ }
-        }
-
-        void ReadServer(out string host, out int port)
-        {
-            host = "192.168.1.15"; port = 11000;
-            var p = Path.Combine(dir, "psobb.cfg");
-            if (!File.Exists(p)) return;
-            foreach (var raw in File.ReadAllLines(p))
-            {
-                var line = raw.Trim();
-                int eq = line.IndexOf('=');
-                if (eq <= 0) continue;
-                var k = line.Substring(0, eq).Trim();
-                var v = line.Substring(eq + 1).Trim();
-                if (k.Equals("PatchHost", StringComparison.OrdinalIgnoreCase) && v.Length > 0) host = v;
-                else if (k.Equals("PatchPort", StringComparison.OrdinalIgnoreCase) && int.TryParse(v, out var pp)) port = pp;
-            }
-        }
-
-        static void EnableTailscaleRoutes()
-        {
-            try
-            {
-                string ts = "tailscale.exe";
-                var pf = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Tailscale", "tailscale.exe");
-                if (File.Exists(pf)) ts = pf;
-                var psi = new ProcessStartInfo
-                {
-                    FileName = ts,
-                    Arguments = "set --accept-routes=true",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                var proc = Process.Start(psi);
-                if (proc != null) proc.WaitForExit(4000);
-            }
-            catch { /* best-effort; not fatal on the LAN */ }
-        }
-
-        static bool IsReachable(string host, int port, int timeoutMs)
-        {
-            using (var client = new TcpClient())
-            {
-                try
-                {
-                    var iar = client.BeginConnect(host, port, null, null);
-                    return iar.AsyncWaitHandle.WaitOne(timeoutMs) && client.Connected;
-                }
-                catch { return false; }
-            }
+            // Apply the controller-prompt texture now so it takes effect for this session's launch too.
+            Helpers.ApplyControllerPrompts(dir, cbController.Checked);
+            Close();
         }
     }
 }
