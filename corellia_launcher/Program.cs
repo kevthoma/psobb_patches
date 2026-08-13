@@ -17,6 +17,7 @@ using System.IO;
 using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace Corellia
 {
@@ -197,7 +198,11 @@ namespace Corellia
 
         RadioButton rbFull, rbWin;
         ComboBox cboRes, cboSceneSharpen;
-        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController;
+        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin;
+
+        // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
+        // native "Save ID and Password" option toggled (remember game ID / remember password).
+        const string PsoRegPath = @"Software\SonicTeam\PSOBB";
 
         static readonly string[] SharpenStrengths = { "0.25", "0.40", "0.50", "0.65", "0.80", "1.0" };
 
@@ -224,7 +229,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 416);
+            ClientSize = new Size(430, 436);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -268,10 +273,15 @@ namespace Corellia
 
             // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
             // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
-            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 326), AutoSize = true };
+            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 322), AutoSize = true };
             Controls.Add(cbController);
 
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 356), Size = new Size(130, 44) };
+            // Remember login — toggles the game's own ACCOUNT_CHECK / PASSWORD_CHECK registry flags
+            // (like the native option). We never read or write the credentials themselves.
+            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 346), AutoSize = true };
+            Controls.Add(cbSaveLogin);
+
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 376), Size = new Size(130, 44) };
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -331,6 +341,7 @@ namespace Corellia
             cboSceneSharpen.Enabled = cbSceneSharpen.Checked;
 
             cbController.Checked = AsBool(d, "ControllerPrompts", true);
+            cbSaveLogin.Checked = ReadSaveLogin();
 
             int w = ParseInt(d, "WindowWidth", 1600);
             int h = ParseInt(d, "WindowHeight", 1200);
@@ -420,9 +431,38 @@ namespace Corellia
             }
             // Apply the controller-prompt texture now so it takes effect for this session's launch too.
             Helpers.ApplyControllerPrompts(dir, cbController.Checked);
+            WriteSaveLogin(cbSaveLogin.Checked);
             // Return to the PSO launcher (online_e.exe hands off to Option and exits).
             Helpers.RelaunchOnline(dir);
             Close();
+        }
+
+        // ---- "Save ID and Password" (game's remember-login registry flags) -----
+        static bool ReadSaveLogin()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(PsoRegPath))
+                {
+                    if (k != null && k.GetValue("ACCOUNT_CHECK") is int i) return i != 0;
+                }
+            }
+            catch { }
+            return true; // default: remember (matches the usual out-of-box behavior)
+        }
+
+        static void WriteSaveLogin(bool on)
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.CreateSubKey(PsoRegPath))
+                {
+                    if (k == null) return;
+                    k.SetValue("ACCOUNT_CHECK", on ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("PASSWORD_CHECK", on ? 1 : 0, RegistryValueKind.DWord);
+                }
+            }
+            catch { }
         }
     }
 }
