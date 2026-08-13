@@ -129,6 +129,26 @@ namespace Corellia
             }
         }
 
+        // Tailscale preflight applies only to LAN/Tailscale targets (canary). A public hostname or IP
+        // (prod, e.g. corellia.thekevops.net) skips it and shows a generic connectivity message instead.
+        public static bool IsPrivateHost(string host)
+        {
+            if (System.Net.IPAddress.TryParse(host, out var ip))
+            {
+                var b = ip.GetAddressBytes();
+                if (b.Length == 4)
+                {
+                    if (b[0] == 10) return true;                               // 10.0.0.0/8
+                    if (b[0] == 192 && b[1] == 168) return true;              // 192.168.0.0/16
+                    if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true; // 172.16.0.0/12
+                    if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return true;// 100.64.0.0/10 (CGNAT/Tailscale)
+                    if (b[0] == 127) return true;                             // loopback
+                }
+                return false; // public IP -> prod
+            }
+            return false; // hostname -> prod (public)
+        }
+
         // Re-open the PSO launcher after the options menu closes. online_e.exe hands off to the Option
         // tool (and exits), so we bring it back; skipped if it's somehow still running (no duplicate).
         public static void RelaunchOnline(string dir)
@@ -155,22 +175,27 @@ namespace Corellia
             Helpers.ApplyControllerPrompts(dir, Helpers.ReadCfgBool(dir, "ControllerPrompts", true));
 
             Helpers.ReadServer(dir, out string host, out int port);
-            Helpers.EnableTailscaleRoutes();
+            bool useTailscale = Helpers.IsPrivateHost(host); // LAN/Tailscale target (canary) vs public prod host
+            if (useTailscale) Helpers.EnableTailscaleRoutes();
             if (!Helpers.IsReachable(host, port, 1500))
             {
                 System.Threading.Thread.Sleep(800); // let freshly-accepted routes come up
                 while (!Helpers.IsReachable(host, port, 1500))
                 {
-                    var msg =
-                        "Can't reach the Corellia server (" + host + ") yet.\n\n" +
-                        "1. Open Tailscale and make sure it's connected.\n" +
-                        "2. Right-click the Tailscale tray icon and enable\n" +
-                        "   'Use Tailscale subnet routes'.\n\n" +
-                        "Then click Retry.";
-                    var r = MessageBox.Show(msg, "Corellia - not connected yet",
+                    string msg = useTailscale
+                        ? "Can't reach the Corellia server (" + host + ") yet.\n\n" +
+                          "1. Open Tailscale and make sure it's connected.\n" +
+                          "2. Right-click the Tailscale tray icon and enable\n" +
+                          "   'Use Tailscale subnet routes'.\n\n" +
+                          "Then click Retry."
+                        : "Can't reach the Corellia server (" + host + ").\n\n" +
+                          "Check your internet connection and try again.\n" +
+                          "(If this keeps happening, the server may be down.)";
+                    var r = MessageBox.Show(msg,
+                        useTailscale ? "Corellia - not connected yet" : "Corellia - can't connect",
                         MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning);
                     if (r != DialogResult.Retry) return; // Cancel = don't launch
-                    Helpers.EnableTailscaleRoutes();
+                    if (useTailscale) Helpers.EnableTailscaleRoutes();
                 }
             }
 
