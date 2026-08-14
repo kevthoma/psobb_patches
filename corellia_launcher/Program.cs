@@ -362,7 +362,7 @@ namespace Corellia
             cbDOF.Checked  = AsBool(d, "DOF", true);
             cbHDR.Checked  = AsBool(d, "HDR", true);
             cbSceneSharpen.Checked = AsBool(d, "SceneSharpen", true);
-            SelectStrength(cboSceneSharpen, d.TryGetValue("SceneSharpenStrength", out var ss) ? ss.Trim() : "0.50");
+            SelectStrength(cboSceneSharpen, d.TryGetValue("SceneSharpenStrength", out var ss) ? ss.Trim() : "0.25");
             cboSceneSharpen.Enabled = cbSceneSharpen.Checked;
 
             cbController.Checked = AsBool(d, "ControllerPrompts", true);
@@ -407,7 +407,7 @@ namespace Corellia
             SetKey(lines, "DOF", cbDOF.Checked ? "1" : "0");
             SetKey(lines, "HDR", cbHDR.Checked ? "1" : "0");
             SetKey(lines, "SceneSharpen", cbSceneSharpen.Checked ? "1" : "0");
-            SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.50");
+            SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.25");
             SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
             // HUD scaling is entangled with the widescreen layout math in the wrapper (non-1.0
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
