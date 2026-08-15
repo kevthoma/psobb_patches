@@ -247,6 +247,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 		return D3DERR_INVALIDCALL;
 
 	pCurrentRenderTarget = nullptr;
+	pMainRenderTarget = nullptr;	// stale across a reset; refreshed each frame below
 	nrts = 0;
 	mrts = 0;
 
@@ -272,8 +273,11 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 	PresentParams.MultiSampleQuality = (MSQuality != 0 && PresentParams.MultiSampleType != D3DMULTISAMPLE_NONE) ? MSQuality - 1 : 0;
 	MSAA = PresentParams.MultiSampleType;
 
-	HRESULT hr = ProxyInterface->Reset(&PresentParams);
-
+	// D3D9 refuses to reset a device while any D3DPOOL_DEFAULT resource or state
+	// block is still alive, so the post-processing chain has to be torn down
+	// BEFORE the reset, not after. Doing it afterwards made Reset fail with
+	// D3DERR_INVALIDCALL every time, which skipped the recreate block below and
+	// left every pointer here null for the rest of the process.
 	SAFE_RELEASE(rgbaBuffer1Surf);
 	SAFE_RELEASE(rgbaBuffer1Tex);
 	SAFE_RELEASE(depthStencilSurf);
@@ -285,6 +289,8 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 	SAFE_DELETE(sharpen);
 	SAFE_DELETE(dof);
 	SAFE_DELETE(depthTexture);
+
+	HRESULT hr = ProxyInterface->Reset(&PresentParams);
 
 	if (SUCCEEDED(hr))
 	{
@@ -714,8 +720,12 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetRenderTarget(IDirect3DSurface8 *pR
 			pMainRenderTarget = pRenderTargetImpl->GetProxyInterface();
 		}
 
-		if (nrts >= 2 && nrts == mrts) {
-			if (depthTexture->isSupported()) {
+		// A device Reset that genuinely fails (D3DERR_DEVICELOST) leaves the whole
+		// post-processing chain torn down until a later Reset succeeds, so check it
+		// is actually there instead of dereferencing it - this used to fault on
+		// depthTexture the first time the scene hit nrts == mrts.
+		if (nrts >= 2 && nrts == mrts && rgbaBuffer1Surf != nullptr && pMainRenderTarget != nullptr) {
+			if (depthTexture != nullptr && depthTexture->isSupported()) {
 				depthTexture->resolveDepth(ProxyInterface, pMainDepthStencilSurf);
 			}
 
@@ -729,38 +739,38 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetRenderTarget(IDirect3DSurface8 *pR
 			ProxyInterface->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
 
 			// SMAA
-			if (g_bSMAA) {
+			if (g_bSMAA && smaa != nullptr) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
 				ProxyInterface->Clear(0, NULL, D3DCLEAR_STENCIL, D3DCOLOR_ARGB(0, 0, 0, 0), 1.0f, 0);
 				smaa->go(rgbaBuffer1Tex, rgbaBuffer1Tex, pMainRenderTarget, SMAA::INPUT_COLOR);
 			}
 
 			// SSAO
-			if (g_bSSAO && depthTexture->isSupported()) {
+			if (g_bSSAO && ssao != nullptr && depthTexture != nullptr && depthTexture->isSupported()) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
 				ssao->go(rgbaBuffer1Tex, depthTexture->getTexture(), pMainRenderTarget);
 			}
 
 			// CelShader
-			if (g_bCelShader) {
+			if (g_bCelShader && celshader != nullptr) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
 				celshader->go(rgbaBuffer1Tex, pMainRenderTarget);
 			}
 
 			// DOF
-			if (g_bDOF && depthTexture->isSupported()) {
+			if (g_bDOF && dof != nullptr && depthTexture != nullptr && depthTexture->isSupported()) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
 				dof->go(rgbaBuffer1Tex, depthTexture->getTexture(), pMainRenderTarget);
 			}
 
 			// HDR ToneMap
-			if (g_bHDR) {
+			if (g_bHDR && tonemap != nullptr) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
 				tonemap->go(rgbaBuffer1Tex, pMainRenderTarget);
 			}
 
 			// Scene sharpen - crisps the 3D world here (before the HUD/text overlay is drawn).
-			if (g_bSceneSharpen) {
+			if (g_bSceneSharpen && sharpen != nullptr) {
 				ProxyInterface->StretchRect(pMainRenderTarget, NULL, rgbaBuffer1Surf, NULL, D3DTEXF_NONE);
 				sharpen->go(rgbaBuffer1Tex, pMainRenderTarget, g_fSceneSharpenStrength);
 			}
