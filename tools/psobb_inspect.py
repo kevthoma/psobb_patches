@@ -226,6 +226,15 @@ def cmd_narrow(args):
         raise SystemExit("no candidates -- run a scan first")
     t = st["type"]
     code, size = FMT[t]
+    # The type is already fixed by the original scan, but accept it as an optional leading token so
+    # `narrow f32 0.5` mirrors `scan f32 0.25`. If given, it must match -- narrowing an f32 scan while
+    # thinking in i32 would silently compare nonsense.
+    if args and args[0] in FMT:
+        if args[0] != t:
+            raise SystemExit(f"scan was {t}, but you passed {args[0]} -- rescan if you meant to change type")
+        args = args[1:]
+    if not args:
+        raise SystemExit("usage: narrow <value> | narrow changed | narrow unchanged")
     mode = args[0]
     _, h = open_target()
     prev = st.get("values")
