@@ -8,6 +8,13 @@
 #define MALLOC(x) HeapAlloc(GetProcessHeap(), 0, (x))
 #define FREE(x) HeapFree(GetProcessHeap(), 0, (x))
 
+/* Written out verbatim when widescreen.cfg is missing. Every value here is duplicated as an
+   in-code fallback below (g_b*/g_f*/g_i*), and the launcher carries its own copy of the same
+   defaults in corellia_launcher/Program.cs -- THREE places. Change a default in all three or a
+   player's experience depends on whether they ever opened the options menu.
+
+   HUDScale is deliberately pinned at 1.0 and not exposed: the widescreen layout math is derived
+   from it, so non-1.0 values leave a black seam rather than just resizing the HUD. */
 static const char default_config[] =
 "MSAA=1\r\n"
 "SMAA=1\r\n"
@@ -29,6 +36,10 @@ BOOL g_bCelShader = 1;
 BOOL g_bDOF = 1;
 BOOL g_bHDR = 1;
 BOOL g_bSceneSharpen = 1;
+/* 0.25, lowered from 0.50 after play-testing -- the CAS pass only reaches the 3D scene (the post-FX
+   block runs before the HUD is composited), and 0.50 read as over-sharpened on world geometry. A
+   matching HUD/text pass was tried in three placements and never affected text, so it was removed;
+   don't reintroduce one expecting it to work. See notes/psobb-client-map.md. */
 float g_fSceneSharpenStrength = 0.25f;
 float g_fHUDScale = 1.0f;
 BOOL g_bWindowed = 0;

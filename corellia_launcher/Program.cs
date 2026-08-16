@@ -413,6 +413,11 @@ namespace Corellia
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
             SetKey(lines, "HUDScale", "1.0");
 
+            // INVARIANT: windowed mode is a widescreen.cfg FLAG the wrapper reads. It must never go
+            // back to the old approach of renaming d3d8.dll to d3d8.dll.off — that DLL is also the
+            // ASI loader, so disabling it silently drops patches/largeassets.asi, the engine then
+            // reads a bundled HD .bml into a vanilla-sized buffer, and the client access-violates on
+            // the first over-cap area (reliably Caves 1). The wrapper stays loaded in every mode.
             SetKey(lines, "Windowed", rbWin.Checked ? "1" : "0");
             ParseRes((string)cboRes.SelectedItem, out int w, out int h);
             SetKey(lines, "WindowWidth", w.ToString());
