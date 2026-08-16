@@ -137,6 +137,37 @@ So `PlayerStats` begins at `meseta - 0x20`. The character name sits at about `me
 UTF-16LE with PSO's "marked" prefix (`\tE` — tab plus the language letter), and appears **twice** in the
 neighbourhood, so there are at least two copies of the player data live at once.
 
+## Effective (displayed) stat block — CONFIRMED LIVE (2026-08-16)
+
+A second, separate block holds the stats the UI actually shows. Found by sweeping memory once for all
+seven displayed values at the same time and looking for a **cluster** — far more effective than
+narrowing a single value, and it needs no in-game changes. Only one cluster in 618 MB carried four or
+more distinct stats.
+
+Offsets relative to the block start (HP max), for the same Lv.178 FOmar:
+
+| Offset | Field | Observed | In-game |
+|---|---|---|---|
+| `-0x08` | **pointer to the baseline `PlayerStats`** | `0x10EDFCAC` | — |
+| `+0x00` | HP max (u16) | 1044 | **✓** |
+| `+0x02` | TP max (u16) | 2275 | **✓** |
+| `+0x08` | `839` \| `42` | — | 839 is the *baseline* atp, not the total |
+| `+0x0C` | EVP total \| DFP total | 974 \| 943 | **✓ both** |
+| `+0x10` | duplicate of `+0x08` | | |
+| `+0x14` | duplicate of `+0x0C` | | |
+| `+0x18` | ATA total \| LCK | 337 \| 96 | **✓ both** |
+| `+0x78` | HP max \| TP max again | 1044 \| 2275 | second copy |
+
+**ATP total (1250) and MST (1340) are NOT in this block** — absent within ±0x800, as are the
+parenthesised "base" figures (ATP 842, ATA 154). So those are computed at display time rather than
+stored, which fits: ATP total depends on the equipped weapon, and MST had no equipment bonus at all
+(base == total == 1340, and 1340 does live in the baseline block).
+
+**The two blocks are linked.** The pointer at `-0x08` is the single pointer to the baseline
+`PlayerStats` found earlier, so one object holds both the effective stats and a reference to the
+baseline. That object is the natural target for a static anchor — and its start is somewhat before this
+block (everything from `-0x40` to `-0x0C` reads as zeros).
+
 ### ⚠ These are heap addresses — the layout is durable, the addresses are not
 
 The player data is **heap-allocated**, not a static global (an early guess that it would be in
