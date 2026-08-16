@@ -9,9 +9,9 @@
 #define FREE(x) HeapFree(GetProcessHeap(), 0, (x))
 
 /* Written out verbatim when widescreen.cfg is missing. Every value here is duplicated as an
-   in-code fallback below (g_b*/g_f*/g_i*), and the launcher carries its own copy of the same
-   defaults in corellia_launcher/Program.cs -- THREE places. Change a default in all three or a
-   player's experience depends on whether they ever opened the options menu.
+   in-code fallback below (the g_b / g_f / g_i globals), and the launcher carries its own copy of
+   the same defaults in corellia_launcher/Program.cs -- THREE places. Change a default in all three
+   or a player's experience depends on whether they ever opened the options menu.
 
    HUDScale is deliberately pinned at 1.0 and not exposed: the widescreen layout math is derived
    from it, so non-1.0 values leave a black seam rather than just resizing the HUD. */
