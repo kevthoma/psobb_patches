@@ -14,7 +14,27 @@ ends** — knowing where something *isn't* is worth recording.
 | Also compatible | `50YJ`, `59NJ` — most published patches list all three |
 | Architecture | x86, 32-bit |
 | Ours to modify | `d3d8.dll` (this repo's wrapper — full source **and CI symbols**), the `.asi` plugins |
-| Not ours | `PsoBB.exe` itself — no symbols, no map, and it ships packed with ASProtect |
+| Not ours | `PsoBB.exe` — no symbols and no map, but **not packed**: fully statically analyzable |
+
+**`PsoBB.exe` is NOT packed** (confirmed 2026-08-16). The ASProtect warning in circulation applies to
+Sega's original distribution; the anzz1 Multi client we ship is already unpacked. Evidence: `.text` is
+5,024,768 bytes at entropy 6.14 and disassembles cleanly at arbitrary offsets deep inside; the import
+table is a full 256 functions across 13 DLLs; `.idata` is intact. The one oddity that trips naive packer
+heuristics is the entry point living in a 5,120-byte `.pseudo` section — that section is 99% zeros and
+holds a 33-byte **patch-loader trampoline**, not a packer stub:
+
+```
+0x00B60000  push 0xB60028            ; "patch.dll"
+            call [0x008F8130]        ; LoadLibraryA
+            push 0xB60032            ; "patch"
+            push eax
+            call [0x008F812C]        ; GetProcAddress
+            call eax                 ; run patch.dll!patch
+            jmp  0x0085AB3C          ; original entry point, in .text
+```
+
+So: static analysis works, the whole address space is readable, and `patch.dll` gets control before the
+game does.
 
 **Column order matters.** Published patches write addresses as `<VERS a b c>` positional against their
 `.versions` line. Where that line reads `50YJ 59NJ 59NL`, **the third column is ours**. Always check the
@@ -30,12 +50,19 @@ ends** — knowing where something *isn't* is worth recording.
 
 | What | Address | Confidence | Source |
 |---|---|---|---|
+| `GetProcAddress` import thunk | `0x008F812C` | **Confirmed** | Read directly out of the entry-point trampoline; also matches the published value exactly |
+| `LoadLibraryA` import thunk | `0x008F8130` | **Confirmed** | Same trampoline, adjacent slot |
+| Original entry point | `0x0085AB3C` | **Confirmed** | `jmp` target at the end of the trampoline |
+| Patch-loader trampoline | `0x00B60000` | **Confirmed** | The `.pseudo` section; loads `patch.dll` and calls its `patch` export |
 | `GetModuleHandleA` import thunk | `0x008F81F0` | Published | newserv `client-functions/ItemPickup.s`, 3rd VERS column |
-| `GetProcAddress` import thunk | `0x008F812C` | Published | same |
-| Item-pickup flag check (hook site) | `0x0068933D` | Published | same — patch hooks here to gate pickup on a key |
+| Item-pickup flag check (hook site) | `0x0068933D` | Published | same — the patch hooks here to gate pickup on a key |
 
-Two resolved Win32 import thunks are a useful foothold: any patch of ours can reach the whole Win32 API
-through them without doing its own resolution.
+Resolved Win32 import thunks are a useful foothold: a patch of ours can reach the whole Win32 API through
+them without doing its own resolution.
+
+**The published addresses check out.** `0x008F812C` was independently confirmed by reading it out of the
+trampoline, which also validates the positional `<VERS>` column rule — the third column really is ours.
+That raises confidence in the rest of `ItemPickup.s`'s 59NL column, and in other patches read the same way.
 
 ## Structures (protocol side, from newserv — reliable)
 
