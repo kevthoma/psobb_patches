@@ -40,6 +40,37 @@ game does.
 `.versions` line. Where that line reads `50YJ 59NJ 59NL`, **the third column is ours**. Always check the
 `.versions` order in the file you're reading — it is not consistent between files.
 
+## Addresses are stable — no ASLR
+
+`PsoBB.exe` has `DYNAMICBASE` off and its relocation directory **stripped**, so it can only ever load at
+`0x00400000`. Absolute addresses are therefore valid across runs, across machines, and across players —
+which is why published patches hardcode them, and why anything confirmed here stays confirmed. (Our own
+`d3d8.dll` is relocatable and prefers `0x10000000`; treat its addresses as RVAs, not absolutes.)
+
+## Tooling: `tools/psobb_inspect.py`
+
+Live read-only inspection of the running client — this is what turns a static-analysis guess into a
+confirmed address. It opens the process with `PROCESS_VM_READ` only and never writes, injects, or
+allocates, so it cannot corrupt a running game.
+
+```
+python tools/psobb_inspect.py modules                  # attach, list modules + bases
+python tools/psobb_inspect.py read 0x008F812C 32       # hex dump + i32/u32/f32 interpretations
+python tools/psobb_inspect.py find 8B0D????????85C9    # byte pattern, ?? = wildcard
+python tools/psobb_inspect.py watch 0x00ABCDEF f32     # poll and print on change
+```
+
+The differential hunt, for anything you can make change in-game:
+
+```
+python tools/psobb_inspect.py scan f32 0.25    # value as it is now
+   ... change it in-game ...
+python tools/psobb_inspect.py narrow f32 0.5   # or: narrow changed / narrow unchanged
+```
+
+Candidates persist in `tools/.psobb_inspect_state.json` between invocations, so a hunt can span several
+sessions. `PSOBB_PROCESS` overrides the target process name.
+
 ## Confidence
 
 - **Confirmed** — verified by us against the running client or a byte-matched binary.
