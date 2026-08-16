@@ -102,23 +102,36 @@ Located by differential scan on the local player's meseta and cross-checked agai
 definition exactly**, which is a useful general result: newserv's structs are a reliable predictor of
 what the client holds in RAM, so we can plan against them before touching a debugger.
 
-Offsets relative to the on-hand meseta field:
+Offsets relative to the on-hand meseta field. **Confidence differs per field** — verified against the
+in-game stat screen and `$li` output for a Lv.178 FOmar:
 
-| Offset from meseta | Field | Type | Observed |
-|---|---|---|---|
-| `-0x20` | `atp` | u16 | 839 |
-| `-0x1E` | `mst` | u16 | 1340 |
-| `-0x1C` | `evp` | u16 | 627 |
-| `-0x1A` | `hp` | u16 | 534 |
-| `-0x18` | `dfp` | u16 | 418 |
-| `-0x16` | `ata` | u16 | 928 |
-| `-0x14` | `lck` | u16 | 96 |
-| `-0x12` | `esp` | u16 | 0 |
-| `-0x10` | `attack_range` | f32 | 20.5 |
-| `-0x0C` | `knockback_range` | f32 | 10.0 |
-| `-0x08` | `level` | u32 | 177 — **0-based**, character displays as Lv.178 |
-| `-0x04` | `experience` | u32 | 36,696,684 |
-| `+0x00` | **`meseta`** | u32 | 99,261 |
+| Offset from meseta | Field | Type | Observed | Verified? |
+|---|---|---|---|---|
+| `-0x20` | `atp` | u16 | 839 | ✗ in-game base is **842** |
+| `-0x1E` | `mst` | u16 | 1340 | **✓ exact** |
+| `-0x1C` | `evp` | u16 | 627 | **✓ exact** |
+| `-0x1A` | `hp` | u16 | 534 | ✗ in-game max is **1044** |
+| `-0x18` | `dfp` | u16 | 418 | **✓ exact** |
+| `-0x16` | `ata` | u16 | 928 | ✗ in-game base is **154** — unexplained |
+| `-0x14` | `lck` | u16 | 96 | **✓ exact** |
+| `-0x12` | `esp` | u16 | 0 | — |
+| `-0x10` | `attack_range` | f32 | 20.5 | — |
+| `-0x0C` | `knockback_range` | f32 | 10.0 | — |
+| `-0x08` | `level` | u32 | 177 | **✓** 0-based; displays as Lv.178 |
+| `-0x04` | `experience` | u32 | 36,696,684 | **✓ exact** (`$li`: 36696684pt) |
+| `+0x00` | **`meseta`** | u32 | 99,261 | **✓ exact** (`$li`: 99261Meseta) |
+
+**`level`, `experience` and `meseta` are certain** — they match the `$li` screen to the digit, and meseta
+was located by differential scan in the first place.
+
+**The stat block is located but is NOT the character's effective stats.** Four of seven match the in-game
+*base* figures exactly; three do not, and searching ±2 KB around meseta finds **no** copy of the displayed
+values — not the totals (ATP 1250, DFP 943, ATA 337, EVP 974) and not HP 1044 or TP 2275. So the effective
+stats the UI renders are computed or cached somewhere else entirely, and this block is closer to the
+level-table baseline: ATP 839 vs 842 is consistent with 3 Power Materials, and HP 534 vs 1044 with armour
+plus HP materials. **ATA 928 vs 154 fits neither reading and is unexplained** — do not trust `-0x16` until
+someone works out what it is. Finding where the displayed stats live is an open question, and a good
+follow-up hunt (scan for 1044 while healing, or for 1250 after an equipment change).
 
 So `PlayerStats` begins at `meseta - 0x20`. The character name sits at about `meseta-0x4C8`, stored
 UTF-16LE with PSO's "marked" prefix (`\tE` — tab plus the language letter), and appears **twice** in the
