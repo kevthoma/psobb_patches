@@ -95,6 +95,60 @@ them without doing its own resolution.
 trampoline, which also validates the positional `<VERS>` column rule — the third column really is ours.
 That raises confidence in the rest of `ItemPickup.s`'s 59NL column, and in other patches read the same way.
 
+## Player stats structure — CONFIRMED LIVE (2026-08-16)
+
+Located by differential scan on the local player's meseta and cross-checked against newserv's
+`PlayerStatsT` (`src/LevelTable.hh:58`). **The client's in-memory layout matches the protocol
+definition exactly**, which is a useful general result: newserv's structs are a reliable predictor of
+what the client holds in RAM, so we can plan against them before touching a debugger.
+
+Offsets relative to the on-hand meseta field:
+
+| Offset from meseta | Field | Type | Observed |
+|---|---|---|---|
+| `-0x20` | `atp` | u16 | 839 |
+| `-0x1E` | `mst` | u16 | 1340 |
+| `-0x1C` | `evp` | u16 | 627 |
+| `-0x1A` | `hp` | u16 | 534 |
+| `-0x18` | `dfp` | u16 | 418 |
+| `-0x16` | `ata` | u16 | 928 |
+| `-0x14` | `lck` | u16 | 96 |
+| `-0x12` | `esp` | u16 | 0 |
+| `-0x10` | `attack_range` | f32 | 20.5 |
+| `-0x0C` | `knockback_range` | f32 | 10.0 |
+| `-0x08` | `level` | u32 | 177 — **0-based**, character displays as Lv.178 |
+| `-0x04` | `experience` | u32 | 36,696,684 |
+| `+0x00` | **`meseta`** | u32 | 99,261 |
+
+So `PlayerStats` begins at `meseta - 0x20`. The character name sits at about `meseta-0x4C8`, stored
+UTF-16LE with PSO's "marked" prefix (`\tE` — tab plus the language letter), and appears **twice** in the
+neighbourhood, so there are at least two copies of the player data live at once.
+
+### ⚠ These are heap addresses — the layout is durable, the addresses are not
+
+The player data is **heap-allocated**, not a static global (an early guess that it would be in
+`PsoBB.exe`'s image was wrong — the one in-image hit for the old value turned out to be ASCII text that
+happened to match). So a raw address like `0x10EDFCCC` is valid only for one process instance. What is
+reusable is the **layout above**, and what is still missing is a **static anchor**: a pointer in
+`PsoBB.exe`'s image that leads to the structure.
+
+Anchor hunt so far: exactly one pointer to the `PlayerStats` base exists (itself on the heap), and
+nothing points at *that* — so the chain is walked by arithmetic, not stored pointers. Value-scanning has
+hit its limit here. Next techniques, in order of expected yield:
+1. **Range pointer scan** — look for any u32 falling inside the object rather than equal to one exact
+   address; the object base is probably near `meseta-0x4D0`, before the name.
+2. **Code reference hunt** — find the instructions that read meseta. `.text` is fully readable and
+   ASLR is off, so the static global holding the player pointer will appear as a literal in a
+   `mov reg, [0x00XXXXXX]` near an access at one of the offsets above.
+
+### Technique notes from this hunt
+
+- **Pick a distinctive value.** Scanning 2926 gave 57 candidates; 99761 gave 3. Small round-ish numbers
+  are everywhere in a game's memory.
+- **Bank operations reallocate the structure.** A narrow across a bank withdrawal lost every candidate,
+  because the value moved rather than changing in place. A shop purchase updated in place and narrowed
+  57 → 3 → 1 cleanly. Prefer in-place changes when narrowing.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,
