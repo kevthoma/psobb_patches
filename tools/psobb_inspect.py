@@ -43,7 +43,10 @@ TH32CS_SNAPMODULE32 = 0x00000010
 MEM_COMMIT = 0x1000
 PAGE_GUARD = 0x100
 PAGE_NOACCESS = 0x01
-READABLE = (0x02, 0x04, 0x20, 0x40)  # READONLY, READWRITE, EXECUTE_READ, EXECUTE_READWRITE
+# READONLY, READWRITE, WRITECOPY, EXECUTE_READ, EXECUTE_READWRITE, EXECUTE_WRITECOPY.
+# WRITECOPY (0x08 / 0x80) matters: mapped image data pages sit in copy-on-write until first written,
+# so leaving them out silently hides parts of the client's own .data from every scan.
+READABLE = (0x02, 0x04, 0x08, 0x20, 0x40, 0x80)
 
 FMT = {  # name -> (struct code, size)
     "i32": ("<i", 4), "u32": ("<I", 4),
