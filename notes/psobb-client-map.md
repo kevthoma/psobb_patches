@@ -193,6 +193,46 @@ hit its limit here. Next techniques, in order of expected yield:
   because the value moved rather than changing in place. A shop purchase updated in place and narrowed
   57 → 3 → 1 cleanly. Prefer in-place changes when narrowing.
 
+## Asset format: `.pae` opening movie — DECODED (2026-08-18)
+
+`data/openning_e.pae` (English; `openning_j.pae` is Japanese) is the character-creation attract reel —
+the thing that looks "barely animated" next to the GameCube CG intro. It is **not a video**. Fully
+decoded; tool is `tools/pae_extract.py` (self-contained: PRS + XVM/XVR parse + DXT1 + PNG/contact sheet).
+
+Layout: `[0x20 header][PRS-compressed body]`. PRS is Sega's LZ (same codec as newserv `prs.cc`).
+
+```
+header  0x00 u32 magic 0x00010001   0x04 u32 decompressed size   0x08/0x0c 0
+        0x10 u32 section-A offset    0x1c u32 XVM-archive offset   0x20.. PRS stream
+```
+
+The blob decompresses to a **~200 KB timeline/script section** (frame order, positions, pans, fades,
+timing — *not yet reversed*) followed by an **XVM texture archive** of still frames:
+
+```
+XVRT entry  0x00 "XVRT"  0x04 u32 datasize  0x0c u32 fmt (6 = DXT1)  0x14 u16 w  0x16 u16 h  0x40.. pixels
+```
+
+`openning_e.pae`: 5,960,374 B → 9,774,300 B decompressed → **379 DXT1 stills** (257×256², 121×128², 1×32²;
+fmt 6 ×375, fmt 7 ×4 — fmt 7 unconfirmed, likely an alpha S3TC variant, decodes fine as DXT1 for preview).
+Content = panned Ragol background vistas, 2×2 atlases of pre-rendered in-game scene shots, class-description
+text slides, and the Blue Burst logo. **That is the entire "movie"** — 2D stills the client pans/fades over,
+capped at 256×256, which is exactly why it reads as static. This is inherent to the BB asset; nothing to do
+with the server or the HD/widescreen wrapper.
+
+Verify anytime: `python tools/pae_extract.py info <path>` / `sheet <path> out.png`.
+
+**No community replacement exists** (checked 2026-08-18): the only documented swap is stock JP↔EN, and we
+already ship EN. GameBanana has zero PSOBB opening mods; no public `.pae` editing tools — this decode is the
+first. So a nicer intro means *authoring* one, not downloading one.
+
+**BACKLOGGED — texture-refresh prototype.** The tractable improvement is re-skinning the 379 stills in place
+with sharper art (same count/timing) and repacking. Needs a PRS *compressor* + XVM *packer* (we only have the
+decoders so far) and answers to two unknowns: (1) does the timeline section reference frames by index only, so
+same-count/same-dims swaps are safe? (2) will the client accept dims > 256² (does the timeline use UV coords
+or fixed pixel rects)? Purely cosmetic attract-mode polish — low priority. Full-motion FMV (GC-style) would
+need hooking the client's movie player to bypass `.pae` entirely; not worth it.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,
