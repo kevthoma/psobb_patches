@@ -233,6 +233,47 @@ same-count/same-dims swaps are safe? (2) will the client accept dims > 256² (do
 or fixed pixel rects)? Purely cosmetic attract-mode polish — low priority. Full-motion FMV (GC-style) would
 need hooking the client's movie player to bypass `.pae` entirely; not worth it.
 
+## Sound and volume — SURVEYED, not built (2026-08-19)
+
+The ask: **a volume control for players.** There is none anywhere today — not in game, not in the setup
+tool. What the client actually has:
+
+- **`option.exe` → "PSOBB SOUND" page** (`TSoundOption` / `PsoSoundOptionFrm`, Delphi VCL form) offers only
+  switches: `Sound ON/OFF`, `3D Sound`, `Sound Quality`, `Global Focus Sound`. It persists to
+  `HKCU\Software\SonicTeam\PSOBB`: **`SOUNDCTRL`** = 3 dwords (ours: `01 01 01`) + **`FOCUS_SOUND`** dword.
+  **No level value exists in the registry**, so there is nothing to write from outside the process.
+- **BGM = CRI ADX, statically linked.** Only `adx_logo` survives as a string — no exported `adxt_*` names to
+  hook by symbol. Music streams from `slbgm_*.afs` / `.ogg`; failure path is `can't create ADXT-BGM #%d`.
+- **Everything reaches the OS through DirectSound**, and `psobb.exe` imports **exactly one** function from
+  `dsound.dll`: **ordinal #1 = `DirectSoundCreate`**. Both the ADX music stream and the effect buffers are
+  created off that one device.
+
+| What | Address | Confidence | Source |
+|---|---|---|---|
+| `dsound.dll` import (ordinal #1, `DirectSoundCreate`) | `0x00B5E734` (`.idata`) | **Confirmed** | Parsed the import directory of our `psobb.exe` |
+| `"Vol=Opt"` (ADX volume parameter string) | `0x0097A400` (`.data`) | **Confirmed** | String scan; the reference site is NOT yet located |
+| `"can't create ADXT-BGM #%d"` | `0x009893D4` (`.data`) | **Confirmed** | String scan — anchor into the BGM creation path |
+| `"SOUNDCTRL"` / `"FOCUS_SOUND"` registry key names | `0x009007E0` / `0x009007EC` (`.data`) | **Confirmed** | String scan — anchor into the settings load |
+
+**Best route if we build it — proxy `dsound.dll`, no game RE at all.** The single `DirectSoundCreate`
+import means a proxy DLL in the game folder owns the whole audio path, and this client already establishes
+the pattern three times over (`d3d8.dll` = our wrapper + ASI loader, `dinput.dll`/`dinput8.dll` = Xidi).
+Wrap `IDirectSound::CreateSoundBuffer` and scale each buffer's volume. **Music vs effects may separate for
+free**: ADX streams its BGM into a streaming buffer while effects are static one-shots, so the buffer flags
+plausibly tell them apart — that is the one thing to verify before promising BGM/SE sliders, and it is
+cheap to check by logging buffer descriptors for one session.
+
+**Cheaper fallback — master volume only, ~150 lines:** an ASI that calls WASAPI `ISimpleAudioVolume` on its
+own process session, driven by a hotkey plus an XInput chord (pad-only players cannot type, the same trap
+that makes `$bank` keyboard-only), persisted to the registry. Zero RE. Unknown: whether Wine/Proton honours
+per-session volume for the Steam Deck build — check before shipping it there.
+
+**Not worth it: sliders inside the game's own options menu.** The in-game menu is not extensible without
+serious RE, and the win over a hotkey is small.
+
+**Free workaround available right now:** the Windows Volume Mixer sets a per-app level for `psobb.exe` and
+remembers it; the client runs windowed, so it is one alt-tab away. Deck players have hardware volume keys.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,
@@ -266,6 +307,7 @@ selections is upstream of it. Better than searching for the UI directly.
 | Remembered game-creation settings | C1 packet builder (`0x50` bytes) | Best first target — concrete anchor. Needs the struct feeding C1, then persist to `HKCU\Software\SonicTeam\PSOBB`. |
 | Right-stick camera | View matrix via our `SetTransform` | Easier to *find* than the above (a continuously-changing value can be correlated) but far more work after: the auto-camera overwrites each frame, plus collision and lock-on. |
 | Inventory past 30 | `PlayerInventory` at offset 0 | Protocol side understood; the client-side wall is the 30-slot inventory UI, which has no paging. |
+| In-game volume control | `dsound.dll` proxy (single import: ordinal #1 `DirectSoundCreate`) | No game RE needed — wrap `CreateSoundBuffer` and scale per buffer. Verify the streaming-vs-static split before promising separate BGM/SE. See the sound survey above. |
 | Post-quest exit in One Person | — | **No anchor yet.** Confirmed the client sends `0x98` Leave game ~2s after the quest's success handler `ret`s; the trigger is in the client and unlocated. Quest scripts and server are ruled out. |
 
 ## Dead ends (do not re-walk)
