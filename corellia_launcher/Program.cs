@@ -96,6 +96,108 @@ namespace Corellia
             }
         }
 
+        // ---- Per-instance registry key ------------------------------------------
+        // Every PSOBB-derived client -- Coronet, Agrilat, Kor Vella AND Ephinea -- historically
+        // shared HKCU\Software\SonicTeam\PSOBB, so whichever ran last won. When another client
+        // left behind a GRAPHICCTRL display-mode index this build can't satisfy, psobb.exe dies
+        // at D3D init with "Can't find DisplayMode" / "Can't use format [D3DFMT_X8R8G8B8]".
+        //
+        // patch_regkey.ps1 rewrites the 5-char leaf inside the native binaries (psobb.exe,
+        // online_e.exe, option_e.exe) and records the same value here as RegKey=. We read it so
+        // the managed side stays in sync with what was patched. No RegKey => unpatched build =>
+        // legacy shared key, which keeps old installs working unchanged.
+        public const string LegacyLeaf = "PSOBB";
+
+        // Read a string key from psobb.cfg (ReadCfgBool reads widescreen.cfg -- different file).
+        public static string ReadCfgString(string dir, string key, string dflt)
+        {
+            try
+            {
+                var p = Path.Combine(dir, "psobb.cfg");
+                if (!File.Exists(p)) return dflt;
+                foreach (var raw in File.ReadAllLines(p))
+                {
+                    var line = raw.Trim();
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    if (!line.Substring(0, eq).Trim().Equals(key, StringComparison.OrdinalIgnoreCase)) continue;
+                    var v = line.Substring(eq + 1).Trim();
+                    if (v.Length > 0) return v;
+                }
+            }
+            catch { }
+            return dflt;
+        }
+
+        public static string RegLeaf(string dir)
+        {
+            var leaf = ReadCfgString(dir, "RegKey", LegacyLeaf);
+            // The patch is equal-length by design; anything else means a hand-edited cfg, so fall
+            // back to the legacy key rather than inventing one the binaries don't know about.
+            if (leaf.Length != LegacyLeaf.Length) return LegacyLeaf;
+            foreach (var c in leaf)
+                if (!char.IsLetterOrDigit(c) && c != '_') return LegacyLeaf;
+            return leaf;
+        }
+
+        public static string PsoRegPath(string dir)
+        {
+            return @"Software\SonicTeam\" + RegLeaf(dir);
+        }
+
+        // Carried over from the old shared key on first run of a patched build. This is an
+        // ALLOW-LIST on purpose:
+        //   * GRAPHICCTRL and WINDOW_MODE are deliberately absent -- a bad display-mode index in
+        //     those two is the exact failure this whole change exists to prevent, and install.reg
+        //     has already seeded known-good values. Players get Corellia's defaults once.
+        //   * Instance-scoped values (BILLING_SITE, OFFICIAL_SITE, CLIENT_CODE, FONT_JPN, EXT0...)
+        //     are install.reg's to own and differ per build, so they are not copied either.
+        static readonly string[] MigratedValues = {
+            "ACCOUNT", "PASSWORD", "ACCOUNT_CTRL", "ACCOUNT_CHECK", "PASSWORD_CHECK",
+            "CTRLBUF", "SOUNDCTRL", "FOCUS_SOUND", "WORD_WRAP"
+        };
+
+        const string MigrationMarker = "CORELLIA_MIGRATED";
+
+        // One-time copy of the player's login + input/audio prefs from the old shared key into
+        // this build's own key, so upgrading doesn't look like a wiped profile.
+        //
+        // Guarded by a marker VALUE, not by key existence: install.reg creates the new key at
+        // install time, so "key is missing" is never true and would skip the copy entirely.
+        //
+        // Never writes back to PSOBB. Ephinea's settings must come out of this untouched.
+        public static void MigrateLegacyRegistry(string dir)
+        {
+            try
+            {
+                string leaf = RegLeaf(dir);
+                if (leaf.Equals(LegacyLeaf, StringComparison.OrdinalIgnoreCase)) return; // unpatched build
+
+                using (var dst = Registry.CurrentUser.CreateSubKey(@"Software\SonicTeam\" + leaf))
+                {
+                    if (dst == null) return;
+                    if (dst.GetValue(MigrationMarker) != null) return; // already migrated
+
+                    using (var src = Registry.CurrentUser.OpenSubKey(@"Software\SonicTeam\" + LegacyLeaf, false))
+                    {
+                        if (src != null)
+                        {
+                            foreach (var name in MigratedValues)
+                            {
+                                var v = src.GetValue(name, null);
+                                if (v == null) continue;
+                                dst.SetValue(name, v, src.GetValueKind(name));
+                            }
+                        }
+                    }
+
+                    // Stamp even when there was nothing to copy, so a fresh install never re-checks.
+                    dst.SetValue(MigrationMarker, 1, RegistryValueKind.DWord);
+                }
+            }
+            catch { /* non-fatal: worst case the player re-enters their login once */ }
+        }
+
         public static void EnableTailscaleRoutes()
         {
             try
@@ -171,6 +273,10 @@ namespace Corellia
         {
             string dir = AppDomain.CurrentDomain.BaseDirectory;
 
+            // Give this build its own registry key a chance to inherit the player's login from
+            // the old shared one. One-shot and self-marking; safe to call on every launch.
+            Helpers.MigrateLegacyRegistry(dir);
+
             // Apply the controller-prompt texture (from the saved setting) before the game starts.
             Helpers.ApplyControllerPrompts(dir, Helpers.ReadCfgBool(dir, "ControllerPrompts", true));
 
@@ -227,7 +333,9 @@ namespace Corellia
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
         // native "Save ID and Password" option toggled (remember game ID / remember password).
-        const string PsoRegPath = @"Software\SonicTeam\PSOBB";
+        // Per-instance now -- see Helpers.PsoRegPath. Was hardcoded to the shared
+        // @"Software\SonicTeam\PSOBB" before each build got its own leaf.
+        static readonly string PsoRegPath = Helpers.PsoRegPath(AppDomain.CurrentDomain.BaseDirectory);
 
         static readonly string[] SharpenStrengths = { "0.25", "0.40", "0.50", "0.65", "0.80", "1.0" };
 
