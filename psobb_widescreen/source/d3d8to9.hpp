@@ -197,6 +197,14 @@ public:
 private:
 	void ApplyClipPlanes();
 	void ReleaseShadersAndStateBlocks();
+
+	// Device-loss recovery. The client has NO recovery path of its own: it compares the HRESULT
+	// from Present against D3DERR_DEVICELOST and, on a match, shows a message box and quits
+	// (0x0083AE40, see notes/psobb-client-map.md). So the wrapper hides device loss from it and
+	// performs the reset on its behalf.
+	void ReleasePostProcess();
+	void CreatePostProcess(UINT Width, UINT Height);
+	void RecoverLostDevice();
 	void StoreRenderState();
 	void RestoreRenderState();
 	static IDirect3DTexture9* Direct3DDevice8::GetSurfaceTexture(IDirect3DSurface9* pSurface);
@@ -211,6 +219,16 @@ private:
 	bool PaletteFlag = false;
 	bool IsRecordingState = false;
 	bool IsMixedVPModeDevice = false;
+
+	// Present parameters as last accepted by the device, so a reset the client never asked for
+	// can reproduce them exactly.
+	D3DPRESENT_PARAMETERS LastPresentParams = {};
+	bool DeviceIsLost = false;
+	// Diagnostic only: how many D3DPOOL_DEFAULT resources the CLIENT has asked us to create.
+	// A reset cannot succeed while any of them are alive, and only the client could free them --
+	// so if a recovery ever fails, this number is the first thing to look at. Never decremented;
+	// zero is the meaningful value.
+	unsigned int ClientDefaultPoolCreates = 0;
 
 	static constexpr size_t MAX_CLIP_PLANES = 6;
 	float StoredClipPlanes[MAX_CLIP_PLANES][4] = {};

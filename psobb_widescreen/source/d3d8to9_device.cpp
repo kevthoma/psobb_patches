@@ -27,6 +27,7 @@ Direct3DDevice8::Direct3DDevice8(Direct3D8 *d3d, IDirect3DDevice9 *ProxyInterfac
 	IsMixedVPModeDevice = (BehaviorFlags & D3DCREATE_MIXED_VERTEXPROCESSING) != 0;
 	ZBufferDiscarding = (PresentParams->Flags & D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL) != 0;
 	MSAA = PresentParams->MultiSampleType;
+	LastPresentParams = *PresentParams;
 
 	ProxyInterface->GetDeviceCaps(&devCaps);
 
@@ -300,6 +301,23 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 	// BEFORE the reset, not after. Doing it afterwards made Reset fail with
 	// D3DERR_INVALIDCALL every time, which skipped the recreate block below and
 	// left every pointer here null for the rest of the process.
+	ReleasePostProcess();
+
+	HRESULT hr = ProxyInterface->Reset(&PresentParams);
+
+	if (SUCCEEDED(hr))
+	{
+		LastPresentParams = PresentParams;
+		DeviceIsLost = false;
+		CreatePostProcess(PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
+	}
+
+	return hr;
+}
+// Tear down everything this wrapper holds in D3DPOOL_DEFAULT. D3D9 refuses to reset a device while
+// any default-pool resource or state block is alive, so this has to run BEFORE the reset.
+void Direct3DDevice8::ReleasePostProcess()
+{
 	SAFE_RELEASE(rgbaBuffer1Surf);
 	SAFE_RELEASE(rgbaBuffer1Tex);
 	SAFE_RELEASE(depthStencilSurf);
@@ -311,41 +329,86 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 	SAFE_DELETE(sharpen);
 	SAFE_DELETE(dof);
 	SAFE_DELETE(depthTexture);
+}
 
-	HRESULT hr = ProxyInterface->Reset(&PresentParams);
+// Rebuild it at the given backbuffer size. Mirrors the constructor.
+void Direct3DDevice8::CreatePostProcess(UINT Width, UINT Height)
+{
+	ProxyInterface->GetDeviceCaps(&devCaps);
 
-	if (SUCCEEDED(hr))
-	{
-		ProxyInterface->GetDeviceCaps(&devCaps);
+	ProxyInterface->CreateTexture(Width, Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &rgbaBuffer1Tex, NULL);
+	rgbaBuffer1Tex->GetSurfaceLevel(0, &rgbaBuffer1Surf);
+	ProxyInterface->CreateDepthStencilSurface(Width, Height, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &depthStencilSurf, NULL);
+	ProxyInterface->CreateStateBlock(D3DSBT_ALL, &prevStateBlock);
 
-		ProxyInterface->CreateTexture(PresentParams.BackBufferWidth, PresentParams.BackBufferHeight, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &rgbaBuffer1Tex, NULL);
-		rgbaBuffer1Tex->GetSurfaceLevel(0, &rgbaBuffer1Surf);
-		ProxyInterface->CreateDepthStencilSurface(PresentParams.BackBufferWidth, PresentParams.BackBufferHeight, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, FALSE, &depthStencilSurf, NULL);
-		ProxyInterface->CreateStateBlock(D3DSBT_ALL, &prevStateBlock);
-
-		depthTexture = new DepthTexture(D3D->GetProxyInterface());
-		if (depthTexture->isSupported()) {
-			depthTexture->createTexture(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
-			ssao = new SSAO(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight, depthTexture->isRAWZ());
-			dof = new DOF(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight, depthTexture->isRAWZ());
-		}
-
-		smaa = new SMAA(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight, SMAA::PRESET_HIGH);
-		tonemap = new HDRToneMap(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
-		celshader = new CelShader(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
-		sharpen = new Sharpen(ProxyInterface, PresentParams.BackBufferWidth, PresentParams.BackBufferHeight);
-
-		if (MSAA != D3DMULTISAMPLE_NONE) {
-			ProxyInterface->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
-		}
-
-		// The default value of D3DRS_POINTSIZE_MIN is 0.0f in D3D8,
-		// whereas in D3D9 it is 1.0f, so adjust it as needed
-		ProxyInterface->SetRenderState(D3DRS_POINTSIZE_MIN, (DWORD) 0.0f);
+	depthTexture = new DepthTexture(D3D->GetProxyInterface());
+	if (depthTexture->isSupported()) {
+		depthTexture->createTexture(ProxyInterface, Width, Height);
+		ssao = new SSAO(ProxyInterface, Width, Height, depthTexture->isRAWZ());
+		dof = new DOF(ProxyInterface, Width, Height, depthTexture->isRAWZ());
 	}
 
-	return hr;
+	smaa = new SMAA(ProxyInterface, Width, Height, SMAA::PRESET_HIGH);
+	tonemap = new HDRToneMap(ProxyInterface, Width, Height);
+	celshader = new CelShader(ProxyInterface, Width, Height);
+	sharpen = new Sharpen(ProxyInterface, Width, Height);
+
+	if (MSAA != D3DMULTISAMPLE_NONE) {
+		ProxyInterface->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
+	}
+
+	// The default value of D3DRS_POINTSIZE_MIN is 0.0f in D3D8,
+	// whereas in D3D9 it is 1.0f, so adjust it as needed
+	ProxyInterface->SetRenderState(D3DRS_POINTSIZE_MIN, (DWORD) 0.0f);
 }
+
+// Called once per frame while the device is lost. The client cannot do this itself -- it has no
+// device-loss handling at all and quits the moment it sees D3DERR_DEVICELOST -- so the wrapper
+// waits for the device to become resettable and resets it with the parameters it last used.
+//
+// This is what makes exclusive fullscreen usable: alt-tabbing out of a fullscreen device loses it
+// every time. It equally covers a driver reset or an RDP session in the other display modes, which
+// used to end the session with the client's own error box.
+void Direct3DDevice8::RecoverLostDevice()
+{
+	const HRESULT coop = ProxyInterface->TestCooperativeLevel();
+
+	if (coop == D3DERR_DEVICENOTRESET)
+	{
+		// Take a copy: Reset() writes back into the parameters it is given.
+		D3DPRESENT_PARAMETERS params = LastPresentParams;
+
+		pCurrentRenderTarget = nullptr;
+		pMainRenderTarget = nullptr;
+		nrts = 0;
+		mrts = 0;
+
+		ReleasePostProcess();
+
+		const HRESULT hr = ProxyInterface->Reset(&params);
+		if (SUCCEEDED(hr))
+		{
+			LastPresentParams = params;
+			CreatePostProcess(params.BackBufferWidth, params.BackBufferHeight);
+			DeviceIsLost = false;
+#ifndef D3D8TO9NOLOG
+			LOG << "Device recovered after loss." << std::endl;
+#endif
+		}
+#ifndef D3D8TO9NOLOG
+		else
+		{
+			// Almost certainly a surviving D3DPOOL_DEFAULT resource, and the only candidates are the
+			// client's -- ours were just released. Nothing the wrapper can do about those.
+			LOG << "Device reset FAILED (0x" << std::hex << hr << std::dec
+			    << "); client default-pool creates so far: " << ClientDefaultPoolCreates << std::endl;
+		}
+#endif
+	}
+	// coop == D3DERR_DEVICELOST: still held by something else (an alt-tabbed exclusive app, a
+	// screen lock). Nothing to do but try again on the next frame.
+}
+
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, const RECT *pDestRect, HWND hDestWindowOverride, const RGNDATA *pDirtyRegion)
 {
 	UNREFERENCED_PARAMETER(pDirtyRegion);
@@ -353,7 +416,27 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, cons
 	mrts = nrts;
 	nrts = 0;
 
-	return ProxyInterface->Present(pSourceRect, pDestRect, hDestWindowOverride, nullptr);
+	const HRESULT hr = ProxyInterface->Present(pSourceRect, pDestRect, hDestWindowOverride, nullptr);
+
+	// NEVER report device loss to the client. It compares this HRESULT against D3DERR_DEVICELOST
+	// and, on a match, shows "the display properties were changed" and terminates -- it has no
+	// recovery path to fall back on. Swallow it, drive the recovery ourselves, and tell the client
+	// the frame presented. Its next frame renders into a lost device, which fails harmlessly, and
+	// once the reset lands it simply carries on.
+	if (hr == D3DERR_DEVICELOST)
+	{
+		DeviceIsLost = true;
+
+		// Pace the loop. Present returns instantly while the device is lost, so without this the
+		// client would spin a core flat out for as long as the player stays alt-tabbed -- exactly
+		// when they are using the machine for something else. Roughly a 60 Hz tick.
+		Sleep(16);
+
+		RecoverLostDevice();
+		return D3D_OK;
+	}
+
+	return hr;
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::GetBackBuffer(UINT iBackBuffer, D3DBACKBUFFER_TYPE Type, IDirect3DSurface8 **ppBackBuffer)
 {
@@ -386,6 +469,10 @@ void STDMETHODCALLTYPE Direct3DDevice8::GetGammaRamp(D3DGAMMARAMP *pRamp)
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateTexture(UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DTexture8 **ppTexture)
 {
+	// Diagnostic for device recovery: a surviving default-pool resource is the one thing that can
+	// make a reset fail, and only the client can free its own. See RecoverLostDevice().
+	if (Pool == D3DPOOL_DEFAULT)
+		ClientDefaultPoolCreates++;
 	if (ppTexture == nullptr)
 		return D3DERR_INVALIDCALL;
 
@@ -422,6 +509,10 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateTexture(UINT Width, UINT Height
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateVolumeTexture(UINT Width, UINT Height, UINT Depth, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DVolumeTexture8 **ppVolumeTexture)
 {
+	// Diagnostic for device recovery: a surviving default-pool resource is the one thing that can
+	// make a reset fail, and only the client can free its own. See RecoverLostDevice().
+	if (Pool == D3DPOOL_DEFAULT)
+		ClientDefaultPoolCreates++;
 	if (ppVolumeTexture == nullptr)
 		return D3DERR_INVALIDCALL;
 
@@ -442,6 +533,10 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateVolumeTexture(UINT Width, UINT 
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateCubeTexture(UINT EdgeLength, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DCubeTexture8 **ppCubeTexture)
 {
+	// Diagnostic for device recovery: a surviving default-pool resource is the one thing that can
+	// make a reset fail, and only the client can free its own. See RecoverLostDevice().
+	if (Pool == D3DPOOL_DEFAULT)
+		ClientDefaultPoolCreates++;
 	if (ppCubeTexture == nullptr)
 		return D3DERR_INVALIDCALL;
 
@@ -462,6 +557,10 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateCubeTexture(UINT EdgeLength, UI
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateVertexBuffer(UINT Length, DWORD Usage, DWORD FVF, D3DPOOL Pool, IDirect3DVertexBuffer8 **ppVertexBuffer)
 {
+	// Diagnostic for device recovery: a surviving default-pool resource is the one thing that can
+	// make a reset fail, and only the client can free its own. See RecoverLostDevice().
+	if (Pool == D3DPOOL_DEFAULT)
+		ClientDefaultPoolCreates++;
 	if (ppVertexBuffer == nullptr)
 		return D3DERR_INVALIDCALL;
 
@@ -479,6 +578,10 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateVertexBuffer(UINT Length, DWORD
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateIndexBuffer(UINT Length, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DIndexBuffer8 **ppIndexBuffer)
 {
+	// Diagnostic for device recovery: a surviving default-pool resource is the one thing that can
+	// make a reset fail, and only the client can free its own. See RecoverLostDevice().
+	if (Pool == D3DPOOL_DEFAULT)
+		ClientDefaultPoolCreates++;
 	if (ppIndexBuffer == nullptr)
 		return D3DERR_INVALIDCALL;
 
