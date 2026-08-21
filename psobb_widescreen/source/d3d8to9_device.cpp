@@ -7,7 +7,42 @@
 //#include "d3dx9.hpp"
 #include "d3d8to9.hpp"
 #include <regex>
+#include <cstdio>
+#include <cstdarg>
 #include <assert.h>
+
+// ---------------------------------------------------------------------------------------------
+// Device-recovery log. Deliberately NOT the d3d8to9 LOG macro: that one is compiled out of Release
+// builds (D3D8TO9NOLOG), and device loss is precisely the thing we need evidence about from a real
+// player on a real build. Writes a handful of lines per session, next to the game executable, and
+// only ever when a device is actually lost -- a normal session leaves no file at all.
+static void RecoveryLog(const char *fmt, ...)
+{
+	char path[MAX_PATH + 1];
+	if (!GetModuleFileNameA(nullptr, path, MAX_PATH))
+		return;
+	path[MAX_PATH] = 0;
+	char *slash = strrchr(path, '\\');
+	if (!slash)
+		return;
+	strcpy(slash + 1, "d3d8_recovery.log");
+
+	FILE *f = fopen(path, "a");
+	if (!f)
+		return;
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+	fprintf(f, "%02d:%02d:%02d.%03d  ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(f, fmt, args);
+	va_end(args);
+
+	fputc('\n', f);
+	fclose(f);
+}
 
 #define D3DXASM_FLAGS 0
 #define ANISOTROPY_LEVEL 16
@@ -373,6 +408,17 @@ void Direct3DDevice8::RecoverLostDevice()
 {
 	const HRESULT coop = ProxyInterface->TestCooperativeLevel();
 
+	if (coop != LastCoopLevel)
+	{
+		LastCoopLevel = coop;
+		RecoveryLog("cooperative level -> 0x%08lX (%s); client default-pool creates so far: %u",
+			coop,
+			coop == D3DERR_DEVICELOST ? "DEVICELOST" :
+			coop == D3DERR_DEVICENOTRESET ? "DEVICENOTRESET, resettable" :
+			coop == D3D_OK ? "OK" : "other",
+			ClientDefaultPoolCreates);
+	}
+
 	if (coop == D3DERR_DEVICENOTRESET)
 	{
 		// Take a copy: Reset() writes back into the parameters it is given.
@@ -386,11 +432,28 @@ void Direct3DDevice8::RecoverLostDevice()
 		ReleasePostProcess();
 
 		const HRESULT hr = ProxyInterface->Reset(&params);
+		ResetAttempts++;
+
+		// Log the first few attempts and then thin out: a reset that keeps failing is retried every
+		// frame, and a log line per frame would bury the useful first failure.
+		if (ResetAttempts <= 3 || (ResetAttempts % 300) == 0)
+		{
+			RecoveryLog("reset attempt %u -> 0x%08lX (%s); %ux%u windowed=%d; client default-pool creates: %u",
+				ResetAttempts, hr, SUCCEEDED(hr) ? "OK" :
+				hr == D3DERR_INVALIDCALL ? "INVALIDCALL - a D3DPOOL_DEFAULT resource is still alive" :
+				hr == D3DERR_DEVICELOST ? "DEVICELOST" : "other",
+				params.BackBufferWidth, params.BackBufferHeight, (int)params.Windowed,
+				ClientDefaultPoolCreates);
+		}
+
 		if (SUCCEEDED(hr))
 		{
 			LastPresentParams = params;
 			CreatePostProcess(params.BackBufferWidth, params.BackBufferHeight);
 			DeviceIsLost = false;
+			RecoveryLog("recovered after %u reset attempt(s)", ResetAttempts);
+			ResetAttempts = 0;
+			LastCoopLevel = D3D_OK;
 #ifndef D3D8TO9NOLOG
 			LOG << "Device recovered after loss." << std::endl;
 #endif
@@ -425,7 +488,15 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, cons
 	// once the reset lands it simply carries on.
 	if (hr == D3DERR_DEVICELOST)
 	{
-		DeviceIsLost = true;
+		if (!DeviceIsLost)
+		{
+			DeviceIsLost = true;
+			RecoveryLog("device LOST at Present; mode=%s %ux%u windowed=%d; client default-pool creates: %u",
+				g_iDisplayMode == DISPLAY_FULLSCREEN ? "fullscreen" :
+				g_iDisplayMode == DISPLAY_WINDOWED ? "windowed" : "borderless",
+				LastPresentParams.BackBufferWidth, LastPresentParams.BackBufferHeight,
+				(int)LastPresentParams.Windowed, ClientDefaultPoolCreates);
+		}
 
 		// Pace the loop. Present returns instantly while the device is lost, so without this the
 		// client would spin a core flat out for as long as the player stays alt-tabbed -- exactly

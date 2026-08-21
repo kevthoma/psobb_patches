@@ -229,6 +229,8 @@ private:
 	// so if a recovery ever fails, this number is the first thing to look at. Never decremented;
 	// zero is the meaningful value.
 	unsigned int ClientDefaultPoolCreates = 0;
+	HRESULT LastCoopLevel = D3D_OK;
+	unsigned int ResetAttempts = 0;
 
 	static constexpr size_t MAX_CLIP_PLANES = 6;
 	float StoredClipPlanes[MAX_CLIP_PLANES][4] = {};
