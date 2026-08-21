@@ -274,6 +274,51 @@ serious RE, and the win over a hotkey is small.
 **Free workaround available right now:** the Windows Volume Mixer sets a per-app level for `psobb.exe` and
 remembers it; the client runs windowed, so it is one alt-tab away. Deck players have hardware volume keys.
 
+## Device loss is FATAL by design — CONFIRMED 2026-08-20
+
+The client has **no device-recovery path at all**. It checks the HRESULT from `Present` and, on
+`D3DERR_DEVICELOST`, puts up a Japanese message box and quits. Found while testing an exclusive-
+fullscreen mode, where alt-tab loses the device every time; it killed the game on the first alt-tab.
+
+The message (Shift-JIS at `0x0098AB80`, caption at `0x0098AC00`) reads:
+
+> 画面のプロパティが変更された為、PsoBB.exeを終了します。ゲーム中は、画面のプロパティを変更しないでください。
+> *"The display properties were changed, so PsoBB.exe will exit. Do not change the display properties while in-game."*
+
+The check, inside the present path:
+
+```
+0x0083AE29  ff 51 3c            call dword ptr [ecx+0x3c]   ; IDirect3DDevice8::Present (vtable +0x3C)
+0x0083AE2C  8b 15 f0 be ac 00   mov edx, [0x00ACBEF0]       ; gate: only check once rendering is up
+0x0083AE32  85 d2 / 74 11       test edx,edx / je 0x0083AE47
+0x0083AE36  8b 15 c4 96 ad 00   mov edx, [0x00AD96C4]       ; latch: has the dialog already shown?
+0x0083AE3C  85 d2 / 75 07       test edx,edx / jne 0x0083AE47
+0x0083AE40  3d 68 08 76 88      cmp eax, 0x88760868         ; D3DERR_DEVICELOST
+0x0083AE45  74 27               je  0x0083AE6E              ; -> latch, MessageBoxA, quit
+
+0x0083AE6E  c7 05 c4 96 ad 00 01 00 00 00   mov [0x00AD96C4], 1
+            push 0 / push 0x0098AC00 / push 0x0098AB80 / push [0x00ACBED8]  ; hWnd
+            call [0x008F8348]           ; MessageBoxA
+            call 0x007A62DC             ; teardown
+```
+
+**Consequences.** Exclusive fullscreen cannot work as a plain present-parameters change: the mode
+switch on alt-tab loses the device and the client kills itself before anything can recover. It also
+means *any* genuine device loss ends the session today — a driver TDR, an RDP connect, a resolution
+change on the desktop — even in borderless, which is presumably why this message exists at all.
+
+**The route, if exclusive fullscreen is wanted:** the wrapper has to absorb device loss instead of
+reporting it. Return success from `Direct3DDevice8::Present` on `D3DERR_DEVICELOST`, and internally
+poll `TestCooperativeLevel` until `D3DERR_DEVICENOTRESET`, then run the wrapper's own reset (which
+already tears down and recreates the whole post-processing chain). Viability hinges on whether the
+CLIENT holds any `D3DPOOL_DEFAULT` resources — if it does, the reset fails until they are released
+and only the client could do that. Given it never handles device loss at all, everything is probably
+in the managed pool, which D3D9 restores itself; **verify before committing to this.**
+
+Two cheaper options exist: leave exclusive fullscreen unshipped (borderless never loses the device),
+or patch the `je` at `0x0083AE45` so the client ignores device loss — which just trades a clean exit
+for an undefined one, and is not recommended.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,
