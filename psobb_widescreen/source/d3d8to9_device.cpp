@@ -292,26 +292,8 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 	pPresentationParameters->SwapEffect = D3DSWAPEFFECT_DISCARD;
 	pPresentationParameters->Flags &= ~(D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
 
-	// Mirror CreateDevice exactly. A Reset that dropped Windowed back to TRUE would kick an
-	// exclusive-fullscreen device out to the desktop on the first reset the client performs, and
-	// the player would have no way to get back without restarting the game.
-	if (g_iDisplayMode == DISPLAY_FULLSCREEN)
-	{
-		pPresentationParameters->Windowed = FALSE;
-		pPresentationParameters->BackBufferWidth = g_iWindowWidth;
-		pPresentationParameters->BackBufferHeight = g_iWindowHeight;
-		pPresentationParameters->BackBufferFormat = D3DFMT_X8R8G8B8;
-		pPresentationParameters->FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
-		// The client only ever asks for a windowed device, so its FullScreen_PresentationInterval is
-		// whatever happened to be in the struct -- D3D9 validates that field in fullscreen and would
-		// fail device creation on a junk value. Pin it to vsync, which is what exclusive fullscreen is
-		// for in the first place.
-		pPresentationParameters->FullScreen_PresentationInterval = D3DPRESENT_INTERVAL_ONE;
-	}
-	else
-	{
-		pPresentationParameters->Windowed = TRUE;
-	}
+	// Mirrors CreateDevice: always windowed. See the comment there.
+	pPresentationParameters->Windowed = TRUE;
 
 	D3DPRESENT_PARAMETERS PresentParams;
 	ConvertPresentParameters(*pPresentationParameters, PresentParams);
@@ -509,6 +491,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, cons
 		if (!DeviceIsLost)
 		{
 			DeviceIsLost = true;
+			LostSinceTick = GetTickCount();
 			RecoveryLog("device LOST at Present; mode=%s %ux%u windowed=%d; client default-pool creates: %u",
 				g_iDisplayMode == DISPLAY_FULLSCREEN ? "fullscreen" :
 				g_iDisplayMode == DISPLAY_WINDOWED ? "windowed" : "borderless",
@@ -522,6 +505,18 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, cons
 		Sleep(16);
 
 		RecoverLostDevice();
+
+		// Bounded. Absorbing the loss forever would trade the client's clean exit for a black window
+		// that never comes back -- strictly worse for the player, who at least understood the old
+		// message box. If the device has not returned in this long it is not going to, so hand the
+		// loss back and let the client shut down the way it always did.
+		if (DeviceIsLost && (GetTickCount() - LostSinceTick) > RecoveryTimeoutMs)
+		{
+			RecoveryLog("giving up after %u ms; reporting the loss so the client can exit cleanly",
+				GetTickCount() - LostSinceTick);
+			return hr;
+		}
+
 		return D3D_OK;
 	}
 

@@ -232,6 +232,11 @@ private:
 	HRESULT LastCoopLevel = D3D_OK;
 	unsigned int ResetAttempts = 0;
 	unsigned int RecoveryPolls = 0;
+	DWORD LostSinceTick = 0;
+	// How long to keep a lost device hidden from the client before giving up and letting it exit.
+	// Long enough to ride out a driver reset or an RDP session; short enough that a player is not
+	// left staring at a black screen wondering whether the game is dead.
+	static const DWORD RecoveryTimeoutMs = 10000;
 
 	static constexpr size_t MAX_CLIP_PLANES = 6;
 	float StoredClipPlanes[MAX_CLIP_PLANES][4] = {};
