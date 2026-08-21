@@ -18,6 +18,15 @@ Credits to [fuzziqersoftware](https://github.com/fuzziqersoftware) for the patch
 ## WideScreen
 Runs the game in borderless fullscreen mode for improved compatibility with modern systems and multiple displays, allows the use of widescreen resolutions, and upgrades DirectX 8 to DirectX 9 for improved performance and shader support.
 
+### Display mode
+Set `DisplayMode` in `widescreen.cfg`, or pick it in the options menu:
+
+- **`borderless`** (default) — a borderless window filling the monitor the game launches on, with a windowed D3D9 device behind it. Alt-tabs instantly and ignores `WindowWidth`/`WindowHeight`.
+- **`fullscreen`** — a real exclusive-fullscreen device: the display switches to `WindowWidth` x `WindowHeight` and vsync is on. Use it to run below your desktop resolution, or where exclusive mode buys you something (variable refresh, lower latency). Alt-tabbing costs a mode switch, and if the display cannot scan out the mode requested the wrapper falls back to a window rather than failing the launch.
+- **`windowed`** — a fixed-size titled window of `WindowWidth` x `WindowHeight`, centred.
+
+The older `Windowed=0/1` key is still read for existing configs; `DisplayMode` wins when both are present.
+
 Credits to [tofuman](https://github.com/tofuman0) for the offsets and [crosire](https://github.com/crosire) for the d3d8to9 project used as the base.
 
 Several post-processing effects are implemented via shaders to improve graphical fidelity.  

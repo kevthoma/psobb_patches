@@ -212,6 +212,9 @@ static void parse_line(char* line) {
   if (parse_option_float(p, "hudscale", &g_fHUDScale)) return;
   if (parse_option_int(p, "windowwidth", &g_iWindowWidth)) return;
   if (parse_option_int(p, "windowheight", &g_iWindowHeight)) return;
+  /* ORDER MATTERS: these matchers are substring searches over the whole line, so the "windowed"
+     matcher below also matches the line "DisplayMode=windowed". DisplayMode has to be tried first
+     or that line would be eaten as a legacy Windowed= flag and the mode would be lost. */
   if (parse_option_mode(p, "displaymode", &g_iDisplayMode)) { g_bDisplayModeSeen = 1; return; }
   if (parse_option_bool(p, "windowed", &g_bWindowed)) return;
 }
