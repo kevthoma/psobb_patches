@@ -307,17 +307,38 @@ switch on alt-tab loses the device and the client kills itself before anything c
 means *any* genuine device loss ends the session today — a driver TDR, an RDP connect, a resolution
 change on the desktop — even in borderless, which is presumably why this message exists at all.
 
-**The route, if exclusive fullscreen is wanted:** the wrapper has to absorb device loss instead of
-reporting it. Return success from `Direct3DDevice8::Present` on `D3DERR_DEVICELOST`, and internally
-poll `TestCooperativeLevel` until `D3DERR_DEVICENOTRESET`, then run the wrapper's own reset (which
-already tears down and recreates the whole post-processing chain). Viability hinges on whether the
-CLIENT holds any `D3DPOOL_DEFAULT` resources — if it does, the reset fails until they are released
-and only the client could do that. Given it never handles device loss at all, everything is probably
-in the managed pool, which D3D9 restores itself; **verify before committing to this.**
+**RESOLVED 2026-08-21: exclusive fullscreen is not achievable on this client. Do not re-walk it.**
+The wrapper CAN hide the loss -- `Present` returns `D3D_OK` and the client keeps running, music and
+all -- but hiding it is not enough, because the device then has to be reset and it never becomes
+resettable. Measured on real hardware over 960 polls across 40 seconds:
 
-Two cheaper options exist: leave exclusive fullscreen unshipped (borderless never loses the device),
-or patch the `je` at `0x0083AE45` so the client ignores device loss — which just trades a clean exit
-for an undefined one, and is not recommended.
+```
+poll   1: coop=DEVICELOST foreground=0 active=0 iconic=1   <- Windows minimised it, expected
+poll 121: coop=DEVICELOST foreground=1 active=1 iconic=0   <- restored AND foreground...
+poll 241: coop=DEVICELOST foreground=0 active=1 iconic=0   <- ...lost foreground, never regained
+  ... unchanged to poll 961
+```
+
+`TestCooperativeLevel` never returned `D3DERR_DEVICENOTRESET`, including at poll 121 when the window
+was restored, active and foreground -- so the reset that recovery depends on could never run. The
+symptom is a black screen with working audio, not a crash. Behind that wall sits a second one: the
+client had made **607 `D3DPOOL_DEFAULT` creations**, and a reset fails while any are alive. Only the
+client could release them, and it has no code that does.
+
+Aggravating factor worth noting: the test ran at 3840x2160 on a 2560x1440 panel, i.e. a driver
+virtual-resolution mode, which are fragile. That does not change the conclusion -- alt-tab loses an
+exclusive device regardless -- but the diagnosis was not proven at native resolution.
+
+**What shipped instead.** `DisplayMode=fullscreen` switches the DISPLAY with
+`ChangeDisplaySettingsEx` (enumerating the adapter's modes at that size, highest refresh, so the
+driver is never handed a mode it lacks) *before* the device is created, then runs the ordinary
+borderless popup and windowed device over it. The monitor really changes resolution and the game
+fills it; the device is windowed, so there is nothing to lose on alt-tab. Confirmed working
+2026-08-21. `CDS_FULLSCREEN` makes Windows restore the desktop even if the client dies.
+
+**Device-loss absorption was kept**, bounded to 10 s: it rides out a driver TDR or an RDP connect,
+and if the device does not come back the loss is handed to the client so it exits cleanly instead of
+hanging on a black screen. `d3d8_recovery.log` appears next to the game only when a loss happens.
 
 ## Structures (protocol side, from newserv — reliable)
 
