@@ -10,6 +10,7 @@
 
 extern float g_fHUDScale;
 extern BOOL g_bWindowed;
+extern int g_iDisplayMode;
 extern int g_iWindowWidth;
 extern int g_iWindowHeight;
 
@@ -508,8 +509,73 @@ ULONG listVerticalCenterAlignItems[] = {
 };
 
 RECT rectMon;
-RECT g_windowRect;      // outer window rect (windowed mode), computed in patch_widescreen
+RECT g_windowRect;      // outer window rect (windowed + exclusive fullscreen), computed in patch_widescreen
 DWORD g_windowStyle;    // window style (windowed mode)
+
+// Values must match the DISPLAY_* defines in Options.c.
+#define DISPLAY_BORDERLESS 0
+#define DISPLAY_FULLSCREEN 1
+#define DISPLAY_WINDOWED   2
+
+// Name of the display we switched, so it can be put back. Empty = we never switched anything, and
+// restore_display_mode() must then do nothing at all.
+static char g_switchedDevice[CCHDEVICENAME + 1] = { 0 };
+
+// Switch one monitor to the requested mode. Returns non-zero if the display actually changed.
+//
+// CDS_FULLSCREEN marks it as a temporary, app-owned mode: Windows restores the desktop on its own
+// if the process dies without cleaning up, which is the behaviour we want if the client ever
+// crashes mid-session.
+static BOOL switch_display_mode(HMONITOR monitor, int width, int height) {
+  MONITORINFOEXA mi;
+  DEVMODEA dm;
+  DEVMODEA best;
+  DWORD i;
+  BOOL found = FALSE;
+
+  if (width < 320 || height < 240) return FALSE;
+
+  memset(&mi, 0, sizeof(mi));
+  mi.cbSize = sizeof(MONITORINFOEXA);
+  if (!GetMonitorInfoA(monitor, (LPMONITORINFO)&mi)) return FALSE;
+
+  // Already there? Then there is nothing to switch and nothing to restore later.
+  memset(&dm, 0, sizeof(dm));
+  dm.dmSize = sizeof(DEVMODEA);
+  if (EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) {
+    if ((int)dm.dmPelsWidth == width && (int)dm.dmPelsHeight == height) return FALSE;
+  }
+
+  // Pick the highest refresh rate the adapter offers at this size. Enumerating rather than just
+  // asking for the size means we never hand the driver a mode it does not have.
+  memset(&best, 0, sizeof(best));
+  for (i = 0; ; i++) {
+    memset(&dm, 0, sizeof(dm));
+    dm.dmSize = sizeof(DEVMODEA);
+    if (!EnumDisplaySettingsA(mi.szDevice, i, &dm)) break;
+    if ((int)dm.dmPelsWidth != width || (int)dm.dmPelsHeight != height) continue;
+    if (dm.dmBitsPerPel != 32) continue;
+    if (!found || dm.dmDisplayFrequency > best.dmDisplayFrequency) {
+      best = dm;
+      found = TRUE;
+    }
+  }
+  if (!found) return FALSE;
+
+  best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+  if (ChangeDisplaySettingsExA(mi.szDevice, &best, NULL, CDS_FULLSCREEN, NULL) != DISP_CHANGE_SUCCESSFUL)
+    return FALSE;
+
+  lstrcpynA(g_switchedDevice, mi.szDevice, CCHDEVICENAME);
+  return TRUE;
+}
+
+// Put the display back. Safe to call when nothing was switched.
+void restore_display_mode(void) {
+  if (!g_switchedDevice[0]) return;
+  ChangeDisplaySettingsExA(g_switchedDevice, NULL, NULL, 0, NULL);
+  g_switchedDevice[0] = 0;
+}
 
 HWND __stdcall myCreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y,
                                  int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam) {
@@ -568,6 +634,30 @@ void patch_widescreen(void) {
   info.cbSize = sizeof(MONITORINFO);
   GetMonitorInfoA(monitor, &info);
   memcpy(&rectMon, &info.rcMonitor, sizeof(RECT));
+
+  if (g_iDisplayMode == DISPLAY_FULLSCREEN) {
+    // "Fullscreen" = switch the DISPLAY to the requested mode, then behave exactly like
+    // borderless on top of it: a popup covering the (now differently sized) monitor, with the
+    // same WINDOWED D3D9 device every other mode uses.
+    //
+    // It is deliberately NOT an exclusive-mode device. That was built and tested: alt-tab loses
+    // an exclusive device, this client has no device-loss handling and quits on the spot, and even
+    // with the wrapper absorbing the loss the runtime never moved the device back to
+    // DEVICENOTRESET, so it could never be reset. A windowed device over a switched mode gives the
+    // player the same thing -- the display really changes resolution and the game fills it -- and
+    // survives alt-tab, because there is nothing to lose. See notes/psobb-client-map.md.
+    //
+    // The switch happens HERE, before the device is created, so nothing ever sees a mode change.
+    if (switch_display_mode(monitor, g_iWindowWidth, g_iWindowHeight)) {
+      // The monitor rect moved; re-read it so every measurement below uses the new mode.
+      memset(&info, 0, sizeof(MONITORINFO));
+      info.cbSize = sizeof(MONITORINFO);
+      GetMonitorInfoA(monitor, &info);
+      memcpy(&rectMon, &info.rcMonitor, sizeof(RECT));
+    }
+    // On failure we simply stay at the desktop resolution -- that is ordinary borderless, which is
+    // a perfectly good picture, and far better than refusing to start.
+  }
 
   if (g_bWindowed) {
     // Windowed mode: render at the configured client size and drive ALL the widescreen HUD /

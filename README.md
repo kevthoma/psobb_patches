@@ -18,6 +18,15 @@ Credits to [fuzziqersoftware](https://github.com/fuzziqersoftware) for the patch
 ## WideScreen
 Runs the game in borderless fullscreen mode for improved compatibility with modern systems and multiple displays, allows the use of widescreen resolutions, and upgrades DirectX 8 to DirectX 9 for improved performance and shader support.
 
+### Display mode
+Set `DisplayMode` in `widescreen.cfg`, or pick it in the options menu:
+
+- **`borderless`** (default) — a borderless window filling the monitor the game launches on, with a windowed D3D9 device behind it. Alt-tabs instantly and ignores `WindowWidth`/`WindowHeight`.
+- **`fullscreen`** — switches the *display* to `WindowWidth` x `WindowHeight` (highest refresh rate available at that size) and fills it. Use it to run below your desktop resolution and let the monitor scale. The desktop is restored when you quit. If the adapter has no such mode, it stays at the desktop resolution, which is simply borderless. Note this is not an *exclusive-mode* device — see `notes/psobb-client-map.md` for why that cannot work on this client — so alt-tab is as safe here as anywhere else.
+- **`windowed`** — a fixed-size titled window of `WindowWidth` x `WindowHeight`, centred.
+
+The older `Windowed=0/1` key is still read for existing configs; `DisplayMode` wins when both are present.
+
 Credits to [tofuman](https://github.com/tofuman0) for the offsets and [crosire](https://github.com/crosire) for the d3d8to9 project used as the base.
 
 Several post-processing effects are implemented via shaders to improve graphical fidelity.  

@@ -179,6 +179,14 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 
 	pPresentationParameters->SwapEffect = D3DSWAPEFFECT_DISCARD;
 	pPresentationParameters->Flags &= ~(D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
+
+	// Always a WINDOWED device, in every display mode. Borderless and windowed are windows by
+	// definition, and "Fullscreen" is a real display-mode switch (WideScreen.c) with this same
+	// windowed device drawn over the whole screen -- NOT an exclusive-mode device.
+	//
+	// Exclusive mode was built and tested and does not work on this client: alt-tab loses the
+	// device, and the D3D9 runtime never moved it back to DEVICENOTRESET even with the window
+	// restored and foreground, so it can never be reset. See notes/psobb-client-map.md.
 	pPresentationParameters->Windowed = TRUE;
 
 	D3DPRESENT_PARAMETERS PresentParams;
@@ -198,6 +206,7 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 	IDirect3DDevice9 *DeviceInterface = nullptr;
 
 	const HRESULT hr = ProxyInterface->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, &PresentParams, &DeviceInterface);
+
 	if (FAILED(hr))
 		return hr;
 

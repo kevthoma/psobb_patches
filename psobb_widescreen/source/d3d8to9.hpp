@@ -37,6 +37,13 @@ extern "C" BOOL g_bDOF;
 extern "C" BOOL g_bHDR;
 extern "C" BOOL g_bSceneSharpen;
 extern "C" float g_fSceneSharpenStrength;
+extern "C" int g_iDisplayMode;    /* DISPLAY_* in Options.c: 0 borderless, 1 fullscreen, 2 windowed */
+extern "C" int g_iWindowWidth;
+extern "C" int g_iWindowHeight;
+/* keep in sync with the DISPLAY_* defines in Options.c */
+#define DISPLAY_BORDERLESS 0
+#define DISPLAY_FULLSCREEN 1
+#define DISPLAY_WINDOWED   2
 
 class Direct3D8 : public IDirect3D8
 {
@@ -190,6 +197,14 @@ public:
 private:
 	void ApplyClipPlanes();
 	void ReleaseShadersAndStateBlocks();
+
+	// Device-loss recovery. The client has NO recovery path of its own: it compares the HRESULT
+	// from Present against D3DERR_DEVICELOST and, on a match, shows a message box and quits
+	// (0x0083AE40, see notes/psobb-client-map.md). So the wrapper hides device loss from it and
+	// performs the reset on its behalf.
+	void ReleasePostProcess();
+	void CreatePostProcess(UINT Width, UINT Height);
+	void RecoverLostDevice();
 	void StoreRenderState();
 	void RestoreRenderState();
 	static IDirect3DTexture9* Direct3DDevice8::GetSurfaceTexture(IDirect3DSurface9* pSurface);
@@ -204,6 +219,24 @@ private:
 	bool PaletteFlag = false;
 	bool IsRecordingState = false;
 	bool IsMixedVPModeDevice = false;
+
+	// Present parameters as last accepted by the device, so a reset the client never asked for
+	// can reproduce them exactly.
+	D3DPRESENT_PARAMETERS LastPresentParams = {};
+	bool DeviceIsLost = false;
+	// Diagnostic only: how many D3DPOOL_DEFAULT resources the CLIENT has asked us to create.
+	// A reset cannot succeed while any of them are alive, and only the client could free them --
+	// so if a recovery ever fails, this number is the first thing to look at. Never decremented;
+	// zero is the meaningful value.
+	unsigned int ClientDefaultPoolCreates = 0;
+	HRESULT LastCoopLevel = D3D_OK;
+	unsigned int ResetAttempts = 0;
+	unsigned int RecoveryPolls = 0;
+	DWORD LostSinceTick = 0;
+	// How long to keep a lost device hidden from the client before giving up and letting it exit.
+	// Long enough to ride out a driver reset or an RDP session; short enough that a player is not
+	// left staring at a black screen wondering whether the game is dead.
+	static const DWORD RecoveryTimeoutMs = 10000;
 
 	static constexpr size_t MAX_CLIP_PLANES = 6;
 	float StoredClipPlanes[MAX_CLIP_PLANES][4] = {};

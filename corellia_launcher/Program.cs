@@ -327,8 +327,7 @@ namespace Corellia
         readonly string dir;
         readonly string cfgPath;
 
-        RadioButton rbFull, rbWin;
-        ComboBox cboRes, cboSceneSharpen;
+        ComboBox cboMode, cboRes, cboSceneSharpen;
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin;
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
@@ -339,6 +338,15 @@ namespace Corellia
 
         static readonly string[] SharpenStrengths = { "0.25", "0.40", "0.50", "0.65", "0.80", "1.0" };
 
+        // Display modes, in the order players see them: the recommended one first, the niche one
+        // last. The index maps to the DisplayMode= value the wrapper parses (DISPLAY_* in Options.c).
+        static readonly string[] DisplayModes = { "Borderless Fullscreen", "Fullscreen", "Windowed" };
+        static readonly string[] DisplayModeKeys = { "borderless", "fullscreen", "windowed" };
+        const int ModeBorderless = 0, ModeFullscreen = 1, ModeWindowed = 2;
+
+        // Sizes offered to players (widescreen first, then 4:3 legacy). This is the window size in
+        // Windowed and the display mode to switch to in Fullscreen; Borderless always follows the
+        // monitor it launches on, so the list is disabled there.
         // Windowed sizes offered to players (widescreen first, then 4:3 legacy).
         static readonly string[] Resolutions = {
             "1280 x 720", "1366 x 768", "1600 x 900", "1920 x 1080", "2560 x 1440",
@@ -373,15 +381,17 @@ namespace Corellia
 
             // Display
             var gDisplay = new GroupBox { Text = "Display", Location = new Point(16, 50), Size = new Size(398, 96) };
-            rbFull = new RadioButton { Text = "Fullscreen (widescreen)", Location = new Point(14, 24), AutoSize = true };
-            rbWin = new RadioButton { Text = "Windowed", Location = new Point(14, 54), AutoSize = true };
-            cboRes = new ComboBox { Location = new Point(150, 52), Size = new Size(150, 24), DropDownStyle = ComboBoxStyle.DropDownList };
+            var lblMode = new Label { Text = "Mode:", Location = new Point(14, 28), AutoSize = true };
+            cboMode = new ComboBox { Location = new Point(150, 24), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList };
+            cboMode.Items.AddRange(DisplayModes);
+            var lblRes = new Label { Text = "Resolution:", Location = new Point(14, 60), AutoSize = true };
+            cboRes = new ComboBox { Location = new Point(150, 56), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList };
             cboRes.Items.AddRange(Resolutions);
-            gDisplay.Controls.Add(rbFull);
-            gDisplay.Controls.Add(rbWin);
-            gDisplay.Controls.Add(cboRes);
+            foreach (var c in new Control[] { lblMode, cboMode, lblRes, cboRes }) gDisplay.Controls.Add(c);
             Controls.Add(gDisplay);
-            rbWin.CheckedChanged += (s, e) => cboRes.Enabled = rbWin.Checked;
+            // Borderless always fills the monitor it launches on, so a resolution choice would be a
+            // lie there; the other two both honour it.
+            cboMode.SelectedIndexChanged += (s, e) => cboRes.Enabled = cboMode.SelectedIndex != ModeBorderless;
 
             // Effects
             var gFx = new GroupBox { Text = "Effects", Location = new Point(16, 156), Size = new Size(398, 96) };
@@ -483,10 +493,21 @@ namespace Corellia
             if (idx < 0) { cboRes.Items.Add(res); idx = cboRes.Items.Count - 1; }
             cboRes.SelectedIndex = idx;
 
-            bool windowed = AsBool(d, "Windowed", false);
-            rbWin.Checked = windowed;
-            rbFull.Checked = !windowed;
-            cboRes.Enabled = windowed;
+            // DisplayMode is the current key; Windowed= is what pre-2026-08 configs carry and what
+            // an older d3d8.dll still reads, so it is honoured on the way in and rewritten on the
+            // way out. DisplayMode wins when both are present -- same precedence as the wrapper.
+            int mode = ModeBorderless;
+            if (d.TryGetValue("DisplayMode", out var dm))
+            {
+                int i = Array.FindIndex(DisplayModeKeys, k => k.Equals(dm.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (i >= 0) mode = i;
+            }
+            else if (AsBool(d, "Windowed", false))
+            {
+                mode = ModeWindowed;
+            }
+            cboMode.SelectedIndex = mode;
+            cboRes.Enabled = mode != ModeBorderless;
         }
 
         static int ParseInt(Dictionary<string, string> d, string key, int dflt)
@@ -521,12 +542,17 @@ namespace Corellia
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
             SetKey(lines, "HUDScale", "1.0");
 
-            // INVARIANT: windowed mode is a widescreen.cfg FLAG the wrapper reads. It must never go
+            // INVARIANT: the display mode is a widescreen.cfg KEY the wrapper reads. It must never go
             // back to the old approach of renaming d3d8.dll to d3d8.dll.off — that DLL is also the
             // ASI loader, so disabling it silently drops patches/largeassets.asi, the engine then
             // reads a bundled HD .bml into a vanilla-sized buffer, and the client access-violates on
             // the first over-cap area (reliably Caves 1). The wrapper stays loaded in every mode.
-            SetKey(lines, "Windowed", rbWin.Checked ? "1" : "0");
+            int mode = cboMode.SelectedIndex < 0 ? ModeBorderless : cboMode.SelectedIndex;
+            SetKey(lines, "DisplayMode", DisplayModeKeys[mode]);
+            // Written for compatibility both ways: an older d3d8.dll ignores DisplayMode entirely and
+            // would otherwise keep whatever Windowed= said last. Fullscreen has no old-wrapper
+            // equivalent, so it degrades to borderless there rather than to a small window.
+            SetKey(lines, "Windowed", mode == ModeWindowed ? "1" : "0");
             ParseRes((string)cboRes.SelectedItem, out int w, out int h);
             SetKey(lines, "WindowWidth", w.ToString());
             SetKey(lines, "WindowHeight", h.ToString());

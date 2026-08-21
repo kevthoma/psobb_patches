@@ -159,6 +159,7 @@ extern "C" IDirect3D8 *WINAPI Direct3DCreate8(UINT SDKVersion)
 
 extern "C" void patch_widescreen(void);
 extern "C" void load_options(void);
+extern "C" void restore_display_mode(void);
 
 BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
@@ -166,6 +167,12 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		DisableThreadLibraryCalls(hModule);
 		load_options();
 		patch_widescreen();
+	}
+	else if (dwReason == DLL_PROCESS_DETACH) {
+		// Put the desktop resolution back if Fullscreen switched it. CDS_FULLSCREEN means Windows
+		// would restore it anyway once the process is gone, but doing it here makes a normal quit
+		// restore the desktop immediately rather than after the process finishes tearing down.
+		restore_display_mode();
 	}
 
 	g_hModule = hModule;
