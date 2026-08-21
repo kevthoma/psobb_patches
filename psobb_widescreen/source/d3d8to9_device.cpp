@@ -208,6 +208,8 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateAdditionalSwapChain(D3DPRESENT_
 
 	pPresentationParameters->SwapEffect = D3DSWAPEFFECT_DISCARD;
 	pPresentationParameters->Flags &= ~(D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
+	// Always windowed, even in exclusive-fullscreen mode: D3D9 only ever gives the implicit swap
+	// chain the fullscreen mode, and asking for an additional one fails outright.
 	pPresentationParameters->Windowed = TRUE;
 
 	D3DPRESENT_PARAMETERS PresentParams;
@@ -253,7 +255,27 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 
 	pPresentationParameters->SwapEffect = D3DSWAPEFFECT_DISCARD;
 	pPresentationParameters->Flags &= ~(D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
-	pPresentationParameters->Windowed = TRUE;
+
+	// Mirror CreateDevice exactly. A Reset that dropped Windowed back to TRUE would kick an
+	// exclusive-fullscreen device out to the desktop on the first reset the client performs, and
+	// the player would have no way to get back without restarting the game.
+	if (g_iDisplayMode == DISPLAY_FULLSCREEN)
+	{
+		pPresentationParameters->Windowed = FALSE;
+		pPresentationParameters->BackBufferWidth = g_iWindowWidth;
+		pPresentationParameters->BackBufferHeight = g_iWindowHeight;
+		pPresentationParameters->BackBufferFormat = D3DFMT_X8R8G8B8;
+		pPresentationParameters->FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
+		// The client only ever asks for a windowed device, so its FullScreen_PresentationInterval is
+		// whatever happened to be in the struct -- D3D9 validates that field in fullscreen and would
+		// fail device creation on a junk value. Pin it to vsync, which is what exclusive fullscreen is
+		// for in the first place.
+		pPresentationParameters->FullScreen_PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+	}
+	else
+	{
+		pPresentationParameters->Windowed = TRUE;
+	}
 
 	D3DPRESENT_PARAMETERS PresentParams;
 	ConvertPresentParameters(*pPresentationParameters, PresentParams);

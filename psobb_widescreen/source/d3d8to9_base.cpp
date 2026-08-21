@@ -179,7 +179,29 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 
 	pPresentationParameters->SwapEffect = D3DSWAPEFFECT_DISCARD;
 	pPresentationParameters->Flags &= ~(D3DPRESENTFLAG_LOCKABLE_BACKBUFFER);
-	pPresentationParameters->Windowed = TRUE;
+
+	// The client is patched to WINDOW_MODE = 1 and always asks for a windowed device; the wrapper
+	// decides what that actually means. Borderless and windowed are both a WINDOWED D3D9 device
+	// behind a window that WideScreen.c has already sized. Exclusive fullscreen is the one mode
+	// that needs a real mode switch, so it overrides the request here.
+	if (g_iDisplayMode == DISPLAY_FULLSCREEN)
+	{
+		pPresentationParameters->Windowed = FALSE;
+		pPresentationParameters->BackBufferWidth = g_iWindowWidth;
+		pPresentationParameters->BackBufferHeight = g_iWindowHeight;
+		// A fullscreen swapchain must use a display format, not an arbitrary backbuffer format.
+		pPresentationParameters->BackBufferFormat = D3DFMT_X8R8G8B8;
+		pPresentationParameters->FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
+		// The client only ever asks for a windowed device, so its FullScreen_PresentationInterval is
+		// whatever happened to be in the struct -- D3D9 validates that field in fullscreen and would
+		// fail device creation on a junk value. Pin it to vsync, which is what exclusive fullscreen is
+		// for in the first place.
+		pPresentationParameters->FullScreen_PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+	}
+	else
+	{
+		pPresentationParameters->Windowed = TRUE;
+	}
 
 	D3DPRESENT_PARAMETERS PresentParams;
 	ConvertPresentParameters(*pPresentationParameters, PresentParams);
@@ -197,7 +219,26 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 
 	IDirect3DDevice9 *DeviceInterface = nullptr;
 
-	const HRESULT hr = ProxyInterface->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, &PresentParams, &DeviceInterface);
+	HRESULT hr = ProxyInterface->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, &PresentParams, &DeviceInterface);
+
+	// A player can pick a resolution their display cannot actually scan out, and an exclusive
+	// device is the only mode that can fail for that reason. Failing the launch outright would be
+	// the worst outcome (the game dies before anything is on screen and the options menu is the
+	// only way back), so drop to a windowed device at the same size and let them play.
+	if (FAILED(hr) && g_iDisplayMode == DISPLAY_FULLSCREEN)
+	{
+		PresentParams.Windowed = TRUE;
+		PresentParams.FullScreen_RefreshRateInHz = 0;
+		PresentParams.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+		hr = ProxyInterface->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, &PresentParams, &DeviceInterface);
+
+		// Stay fallen back. Reset() reads the same global, so leaving it on FULLSCREEN would make
+		// every later reset retry the mode switch, fail, and leave the post-processing chain torn
+		// down until something reset successfully again.
+		if (SUCCEEDED(hr))
+			g_iDisplayMode = DISPLAY_BORDERLESS;
+	}
+
 	if (FAILED(hr))
 		return hr;
 

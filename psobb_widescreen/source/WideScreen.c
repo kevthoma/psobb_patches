@@ -10,6 +10,7 @@
 
 extern float g_fHUDScale;
 extern BOOL g_bWindowed;
+extern int g_iDisplayMode;
 extern int g_iWindowWidth;
 extern int g_iWindowHeight;
 
@@ -508,8 +509,13 @@ ULONG listVerticalCenterAlignItems[] = {
 };
 
 RECT rectMon;
-RECT g_windowRect;      // outer window rect (windowed mode), computed in patch_widescreen
+RECT g_windowRect;      // outer window rect (windowed + exclusive fullscreen), computed in patch_widescreen
 DWORD g_windowStyle;    // window style (windowed mode)
+
+// Values must match the DISPLAY_* defines in Options.c.
+#define DISPLAY_BORDERLESS 0
+#define DISPLAY_FULLSCREEN 1
+#define DISPLAY_WINDOWED   2
 
 HWND __stdcall myCreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle, int X, int Y,
                                  int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam) {
@@ -519,6 +525,16 @@ HWND __stdcall myCreateWindowExA(DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpW
     nWidth = g_windowRect.right - g_windowRect.left;
     nHeight = g_windowRect.bottom - g_windowRect.top;
     dwStyle = g_windowStyle;
+    dwExStyle = WS_EX_APPWINDOW;
+  } else if (g_iDisplayMode == DISPLAY_FULLSCREEN) {
+    // Exclusive fullscreen: a borderless popup at the monitor origin, already sized to the mode
+    // we are about to switch into. D3D9 resizes the focus window itself, but handing it a window
+    // that already matches avoids a visible resize on the way in.
+    X = g_windowRect.left;
+    Y = g_windowRect.top;
+    nWidth = g_windowRect.right - g_windowRect.left;
+    nHeight = g_windowRect.bottom - g_windowRect.top;
+    dwStyle = WS_POPUP;
     dwExStyle = WS_EX_APPWINDOW;
   } else {
     X = rectMon.left;
@@ -568,6 +584,36 @@ void patch_widescreen(void) {
   info.cbSize = sizeof(MONITORINFO);
   GetMonitorInfoA(monitor, &info);
   memcpy(&rectMon, &info.rcMonitor, sizeof(RECT));
+
+  if (g_iDisplayMode == DISPLAY_FULLSCREEN) {
+    // Exclusive fullscreen: the display switches to WindowWidth x WindowHeight and the D3D9
+    // device is created with Windowed=FALSE (see Direct3D8::CreateDevice). As in windowed mode,
+    // rectMon becomes the RENDER rect so all the widescreen HUD math below targets the mode we
+    // asked for rather than the desktop resolution -- they differ whenever a player picks a
+    // resolution below native, which is the main reason to want this mode at all.
+    int cw = g_iWindowWidth;
+    int ch = g_iWindowHeight;
+    if (cw < 320) cw = 320;
+    if (ch < 240) ch = 240;
+    // Unlike windowed, a fullscreen mode LARGER than the desktop is legal (the display switches
+    // up to it), so only clamp to something the adapter can plausibly scan out.
+    if (cw > 7680) cw = 7680;
+    if (ch > 4320) ch = 4320;
+
+    g_windowRect.left = rectMon.left;
+    g_windowRect.top = rectMon.top;
+    g_windowRect.right = rectMon.left + cw;
+    g_windowRect.bottom = rectMon.top + ch;
+
+    rectMon.left = 0;
+    rectMon.top = 0;
+    rectMon.right = cw;
+    rectMon.bottom = ch;
+
+    // Hand the device the exact mode we sized everything for.
+    g_iWindowWidth = cw;
+    g_iWindowHeight = ch;
+  }
 
   if (g_bWindowed) {
     // Windowed mode: render at the configured client size and drive ALL the widescreen HUD /

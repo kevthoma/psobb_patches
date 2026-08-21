@@ -15,6 +15,12 @@
 
    HUDScale is deliberately pinned at 1.0 and not exposed: the widescreen layout math is derived
    from it, so non-1.0 values leave a black seam rather than just resizing the HUD. */
+/* Values for g_iDisplayMode / the DisplayMode= key. Keep in sync with the launcher's
+   DisplayModes[] in corellia_launcher/Program.cs. */
+#define DISPLAY_BORDERLESS 0
+#define DISPLAY_FULLSCREEN 1
+#define DISPLAY_WINDOWED   2
+
 static const char default_config[] =
 "MSAA=1\r\n"
 "SMAA=1\r\n"
@@ -25,6 +31,7 @@ static const char default_config[] =
 "SceneSharpen=1\r\n"
 "SceneSharpenStrength=0.25\r\n"
 "HUDScale=1.0\r\n"
+"DisplayMode=borderless\r\n"
 "Windowed=0\r\n"
 "WindowWidth=1600\r\n"
 "WindowHeight=1200\r\n";
@@ -42,6 +49,19 @@ BOOL g_bSceneSharpen = 1;
    don't reintroduce one expecting it to work. See notes/psobb-client-map.md. */
 float g_fSceneSharpenStrength = 0.25f;
 float g_fHUDScale = 1.0f;
+/* Display mode. DISPLAY_BORDERLESS is the default and is what every build before 2026-08
+   shipped: a WS_POPUP window covering the monitor, with a WINDOWED D3D9 device behind it.
+   DISPLAY_FULLSCREEN is a real exclusive-fullscreen device (Windowed=FALSE) at
+   WindowWidth x WindowHeight -- what a player means by "dedicated fullscreen": the display
+   actually switches mode and the driver owns the flip chain. DISPLAY_WINDOWED is the titled,
+   fixed-size window.
+
+   g_bWindowed is kept because the widescreen layout code here and in WideScreen.c keys off it;
+   load_config() derives it from g_iDisplayMode so the two can never disagree. The legacy
+   "Windowed=0/1" key is still parsed so an existing widescreen.cfg keeps working, and
+   DisplayMode wins whenever both are present. */
+int g_iDisplayMode = DISPLAY_BORDERLESS;
+static BOOL g_bDisplayModeSeen = 0;   /* did the cfg carry an explicit DisplayMode= line? */
 BOOL g_bWindowed = 0;
 int g_iWindowWidth = 1600;
 int g_iWindowHeight = 1200;
@@ -157,6 +177,26 @@ static BOOL parse_option_int(char* ptr, const char* option, int* out) {
   return 0;
 }
 
+/* DisplayMode=borderless|fullscreen|windowed. Anything unrecognised leaves the mode alone
+   rather than guessing, so a typo degrades to the default instead of dropping a player into a
+   mode they did not pick. "0"/"1" are also accepted and mean borderless/windowed, matching what
+   the old Windowed= key meant. */
+static BOOL parse_option_mode(char* ptr, const char* option, int* out) {
+  char* p = ptr;
+  if (!__stristr(p, option)) return 0;
+  while (*p && *p != '=') p++;
+  if (*p != '=') return 0;
+  p++;
+  while (*p && (*p == ' ' || *p == '\t')) p++;
+  if (!*p) return 0;
+  if (__stristr(p, "borderless")) { *out = DISPLAY_BORDERLESS; return 1; }
+  if (__stristr(p, "fullscreen")) { *out = DISPLAY_FULLSCREEN; return 1; }
+  if (__stristr(p, "windowed"))   { *out = DISPLAY_WINDOWED;   return 1; }
+  if (*p == '0') { *out = DISPLAY_BORDERLESS; return 1; }
+  if (*p == '1') { *out = DISPLAY_WINDOWED;   return 1; }
+  return 0;
+}
+
 static void parse_line(char* line) {
   char* p = line;
   while (*p && (*p == ' ' || *p == '\t')) p++;
@@ -172,6 +212,7 @@ static void parse_line(char* line) {
   if (parse_option_float(p, "hudscale", &g_fHUDScale)) return;
   if (parse_option_int(p, "windowwidth", &g_iWindowWidth)) return;
   if (parse_option_int(p, "windowheight", &g_iWindowHeight)) return;
+  if (parse_option_mode(p, "displaymode", &g_iDisplayMode)) { g_bDisplayModeSeen = 1; return; }
   if (parse_option_bool(p, "windowed", &g_bWindowed)) return;
 }
 
@@ -240,4 +281,12 @@ static void SetWorkingDir(void) {
 void load_options(void) {
   SetWorkingDir();
   load_config();
+
+  /* Reconcile the two keys. An old cfg has only Windowed=, a new one has both, and DisplayMode
+     wins when present. From here on g_iDisplayMode is the single source of truth and g_bWindowed
+     is derived from it -- nothing downstream should ever test them independently. */
+  if (!g_bDisplayModeSeen) {
+    g_iDisplayMode = g_bWindowed ? DISPLAY_WINDOWED : DISPLAY_BORDERLESS;
+  }
+  g_bWindowed = (g_iDisplayMode == DISPLAY_WINDOWED);
 }

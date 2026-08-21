@@ -37,6 +37,13 @@ extern "C" BOOL g_bDOF;
 extern "C" BOOL g_bHDR;
 extern "C" BOOL g_bSceneSharpen;
 extern "C" float g_fSceneSharpenStrength;
+extern "C" int g_iDisplayMode;    /* DISPLAY_* in Options.c: 0 borderless, 1 fullscreen, 2 windowed */
+extern "C" int g_iWindowWidth;
+extern "C" int g_iWindowHeight;
+/* keep in sync with the DISPLAY_* defines in Options.c */
+#define DISPLAY_BORDERLESS 0
+#define DISPLAY_FULLSCREEN 1
+#define DISPLAY_WINDOWED   2
 
 class Direct3D8 : public IDirect3D8
 {
