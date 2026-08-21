@@ -407,6 +407,24 @@ void Direct3DDevice8::CreatePostProcess(UINT Width, UINT Height)
 void Direct3DDevice8::RecoverLostDevice()
 {
 	const HRESULT coop = ProxyInterface->TestCooperativeLevel();
+	RecoveryPolls++;
+
+	// Heartbeat, roughly every two seconds at the paced 60 Hz. Its PRESENCE is half the evidence:
+	// this only runs from Present, so if the client stops rendering while it is not the foreground
+	// window, the heartbeat stops too and the recovery never gets a chance to run at all. The window
+	// state tells us the other half -- a fullscreen device will not report DEVICENOTRESET until its
+	// window is back in the foreground.
+	if ((RecoveryPolls % 120) == 1)
+	{
+		D3DDEVICE_CREATION_PARAMETERS cp = {};
+		ProxyInterface->GetCreationParameters(&cp);
+		const HWND hwnd = cp.hFocusWindow;
+		RecoveryLog("poll %u: coop=0x%08lX foreground=%d active=%d iconic=%d visible=%d hwnd=0x%p",
+			RecoveryPolls, coop,
+			(int)(GetForegroundWindow() == hwnd),
+			(int)(GetActiveWindow() == hwnd),
+			(int)IsIconic(hwnd), (int)IsWindowVisible(hwnd), hwnd);
+	}
 
 	if (coop != LastCoopLevel)
 	{

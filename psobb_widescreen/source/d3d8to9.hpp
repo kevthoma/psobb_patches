@@ -231,6 +231,7 @@ private:
 	unsigned int ClientDefaultPoolCreates = 0;
 	HRESULT LastCoopLevel = D3D_OK;
 	unsigned int ResetAttempts = 0;
+	unsigned int RecoveryPolls = 0;
 
 	static constexpr size_t MAX_CLIP_PLANES = 6;
 	float StoredClipPlanes[MAX_CLIP_PLANES][4] = {};
