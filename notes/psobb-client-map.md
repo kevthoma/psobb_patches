@@ -233,7 +233,30 @@ same-count/same-dims swaps are safe? (2) will the client accept dims > 256² (do
 or fixed pixel rects)? Purely cosmetic attract-mode polish — low priority. Full-motion FMV (GC-style) would
 need hooking the client's movie player to bypass `.pae` entirely; not worth it.
 
-## Sound and volume — SURVEYED, not built (2026-08-19)
+## Sound and volume — PHASE 1 BUILT (2026-08-25), survey below from 2026-08-19
+
+**`psobb_dsound/` is the proxy `dsound.dll`.** Phase 1 is pure pass-through: twelve naked `jmp` stubs
+forwarding to `%WINDIR%\SysWOW64\dsound.dll`, resolved lazily on the first export call (never in
+`DllMain` — `LoadLibrary` under the loader lock is how proxy DLLs deadlock) and never by the bare name
+`dsound.dll`, which would load the proxy again. A `jmp` keeps the caller's stack and return address
+intact, so the real function does its own stdcall cleanup and returns straight to the game; that is why
+phase 1 can be behaviour-preserving for all twelve exports without declaring twelve signatures.
+
+**The ordinals are load-bearing and CI checks them.** The game resolves `DirectSoundCreate` by ordinal,
+so a `.def` that drifts from the system layout leaves the import unresolved and the client will not
+start, with no compile error anywhere. `tools/pe_exports.py check` diffs the built export table against
+the runner's own `SysWOW64\dsound.dll` on every build. Real layout (not what you would guess —
+`DllCanUnloadNow`/`DllGetClassObject` are @4/@5, not at the end): `DirectSoundCreate` @1,
+`DirectSoundEnumerateA/W` @2/@3, `DllCanUnloadNow` @4, `DllGetClassObject` @5,
+`DirectSoundCaptureCreate` @6, `DirectSoundCaptureEnumerateA/W` @7/@8, `GetDeviceID` @9,
+`DirectSoundFullDuplexCreate` @10, `DirectSoundCreate8` @11, `DirectSoundCaptureCreate8` @12.
+
+**Logging:** silent by default — creating an empty `dsound_proxy.log` next to the game executable opts
+in to a one-line "proxy active" record; failures are always logged. Same philosophy as the wrapper's
+`RecoveryLog` (a normal session must leave no file), and for the same reason: this ships to everyone.
+
+Phase 2 (buffer census — does `CreateSoundBuffer` separate BGM from effects?) is the next step and is
+the thing that decides whether separate music/effects sliders are possible at all.
 
 The ask: **a volume control for players.** There is none anywhere today — not in game, not in the setup
 tool. What the client actually has:
@@ -250,7 +273,9 @@ tool. What the client actually has:
 
 | What | Address | Confidence | Source |
 |---|---|---|---|
-| `dsound.dll` import (ordinal #1, `DirectSoundCreate`) | `0x00B5E734` (`.idata`) | **Confirmed** | Parsed the import directory of our `psobb.exe` |
+| `dsound.dll` **IAT slot** — the pointer the game calls `DirectSoundCreate` through | `0x008F8068` (`.data`) | **Confirmed** | `tools/pe_exports.py imports PsoBB.exe dsound.dll` |
+| `dsound.dll` import descriptor / OFT | `0x00B5E028` / `0x00B5E180` (`.idata`) | **Confirmed** | Same parse — the import directory itself |
+| `"dsound.dll"` module-name string | `0x00B5E734` (`.idata`) | **Confirmed** | ⚠ CORRECTED 2026-08-25. This address was previously listed here as "the dsound import"; it is only the NAME STRING. Patching it does nothing at runtime — an IAT hook must target `0x008F8068`. |
 | `"Vol=Opt"` (ADX volume parameter string) | `0x0097A400` (`.data`) | **Confirmed** | String scan; the reference site is NOT yet located |
 | `"can't create ADXT-BGM #%d"` | `0x009893D4` (`.data`) | **Confirmed** | String scan — anchor into the BGM creation path |
 | `"SOUNDCTRL"` / `"FOCUS_SOUND"` registry key names | `0x009007E0` / `0x009007EC` (`.data`) | **Confirmed** | String scan — anchor into the settings load |

@@ -62,6 +62,48 @@ jobs:
             psobb_widescreen/bin/Release/d3d8.map
           if-no-files-found: error
 
+  dsound:
+    # Proxy dsound.dll for the player volume control. PSOBB imports exactly one function from
+    # dsound.dll -- ordinal #1, DirectSoundCreate -- so a proxy owns the whole audio path with no
+    # game reverse engineering. 32-bit, same as the client.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build psobb_dsound (Release|Win32)
+        # Same toolset pin as the widescreen job: the runner's VS is newer than the version the
+        # vcxproj selects for, so name v143 explicitly rather than falling back to an absent v141.
+        run: >
+          msbuild psobb_dsound\msvc\psobb_dsound.vcxproj
+          /p:Configuration=Release
+          /p:Platform=Win32
+          /p:PlatformToolset=v143
+          /p:WindowsTargetPlatformVersion=10.0
+          /m /v:minimal
+
+      - name: Show build output
+        run: dir psobb_dsound\bin
+
+      # The load-bearing invariant of this whole DLL. The game resolves DirectSoundCreate by
+      # ORDINAL, so if the .def ever drifts from the system DLL's ordinal layout the import goes
+      # unresolved and the client fails to start -- with no compile error to warn anyone. Diff the
+      # built export table against the runner's own 32-bit dsound.dll and fail the build instead.
+      - name: Verify the export ordinals match the system dsound.dll
+        run: python tools\pe_exports.py check psobb_dsound\bin\dsound.dll $env:WINDIR\SysWOW64\dsound.dll
+        shell: pwsh
+
+      - name: Upload dsound.dll (+ symbols)
+        uses: actions/upload-artifact@v7
+        with:
+          name: dsound-proxy-Release-Win32
+          path: |
+            psobb_dsound/bin/dsound.dll
+            psobb_dsound/bin/dsound.pdb
+          if-no-files-found: error
+
   launcher:
     # Corellia launcher + options app (WinForms, .NET Framework 4.8 -> no runtime install
     # for players). Writes the wrapper's widescreen.cfg; replaces the old .vbs/.ps1 launcher.
