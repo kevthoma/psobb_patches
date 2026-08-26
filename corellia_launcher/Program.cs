@@ -15,8 +15,11 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using System.Drawing.Text;
 using Microsoft.Win32;
 
 namespace Corellia
@@ -327,7 +330,7 @@ namespace Corellia
         readonly string dir;
         readonly string cfgPath;
 
-        ComboBox cboMode, cboRes, cboSceneSharpen;
+        ComboBox cboMode, cboRes, cboSceneSharpen, cboFont;
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin;
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
@@ -344,14 +347,82 @@ namespace Corellia
         static readonly string[] DisplayModeKeys = { "borderless", "fullscreen", "windowed" };
         const int ModeBorderless = 0, ModeFullscreen = 1, ModeWindowed = 2;
 
-        // Sizes offered to players (widescreen first, then 4:3 legacy). This is the window size in
-        // Windowed and the display mode to switch to in Fullscreen; Borderless always follows the
-        // monitor it launches on, so the list is disabled there.
-        // Windowed sizes offered to players (widescreen first, then 4:3 legacy).
-        static readonly string[] Resolutions = {
-            "1280 x 720", "1366 x 768", "1600 x 900", "1920 x 1080", "2560 x 1440",
-            "3840 x 2160", "1600 x 1200", "1280 x 960", "1024 x 768"
-        };
+        // Sizes offered to players. This is the window size in Windowed and the display mode to
+        // switch to in Fullscreen; Borderless always follows the monitor it launches on, so the
+        // list is disabled there.
+        //
+        // ⚠ THIS LIST IS ENUMERATED FROM THE DISPLAY, NOT HARDCODED, AND THAT IS THE WHOLE POINT.
+        // It used to be a fixed list of nine sizes. The client refuses to start on a size the
+        // graphics driver does not report as a display mode -- it exits with code 1 about a fifth
+        // of a second in, no window, no dialog, no crash dump, which reads to a player as "the game
+        // does nothing". That check is meaningless in Windowed mode (a window can be any size) but
+        // the client enforces it regardless, so we cannot offer sizes the display does not have.
+        //
+        // Measured on a 2560x1440 RTX 5090: of the nine sizes the old list offered, FOUR were dead
+        // (1366x768, 1600x900, 1600x1200, 1280x960) because that driver does not advertise them.
+        // A different monitor kills a different four, which is why a fixed list can never be right.
+        // Verified by launching the client across 20 sizes: it starts if and only if the size is in
+        // EnumDisplaySettings, 20 out of 20.
+        static string[] SupportedResolutions()
+        {
+            var seen = new SortedSet<(int, int)>();
+            var dm = new DEVMODE { dmSize = (ushort)Marshal.SizeOf(typeof(DEVMODE)) };
+            for (int i = 0; EnumDisplaySettings(null, i, ref dm); i++)
+            {
+                // 32bpp only, and nothing below the client's own floor.
+                if (dm.dmBitsPerPel != 32) continue;
+                if (dm.dmPelsWidth < 640 || dm.dmPelsHeight < 480) continue;
+                seen.Add(((int)dm.dmPelsWidth, (int)dm.dmPelsHeight));
+                dm.dmSize = (ushort)Marshal.SizeOf(typeof(DEVMODE));
+            }
+            // A machine that reports nothing is not a machine we can guess for: fall back to the
+            // desktop size, which is by definition a real mode.
+            if (seen.Count == 0)
+            {
+                var b = Screen.PrimaryScreen.Bounds;
+                seen.Add((b.Width, b.Height));
+            }
+            return seen.Select(r => r.Item1 + " x " + r.Item2).ToArray();
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+        struct DEVMODE
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+            public ushort dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+            public uint dmFields;
+            public int dmPositionX, dmPositionY;
+            public uint dmDisplayOrientation, dmDisplayFixedOutput;
+            public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+            public ushort dmLogPixels;
+            public uint dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+            public uint dmICMMethod, dmICMIntent, dmMediaType, dmDitherType;
+            public uint dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+        static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+        // In-game font, stored as the game's own FONT_JPN registry string. "System" is a Windows
+        // alias that always resolves, so it is both the default and the safe fallback; the rest are
+        // offered only when actually installed, because naming a missing font gets a player nothing.
+        static readonly string[] FontCandidates = { "System", "Tahoma", "Verdana", "Dotum", "Gulim" };
+        const string DefaultFont = "System";
+
+        static string[] AvailableFonts()
+        {
+            var installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (var c = new InstalledFontCollection())
+                    foreach (var f in c.Families) installed.Add(f.Name);
+            }
+            catch { }
+            // "System" is a GDI alias rather than a font family, so it never appears in the
+            // collection -- keep it unconditionally or the list would come back empty-ish.
+            return FontCandidates.Where(f => f == DefaultFont || installed.Contains(f)).ToArray();
+        }
 
         public MainForm()
         {
@@ -370,7 +441,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 436);
+            ClientSize = new Size(430, 468);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -380,21 +451,24 @@ namespace Corellia
             Controls.Add(title);
 
             // Display
-            var gDisplay = new GroupBox { Text = "Display", Location = new Point(16, 50), Size = new Size(398, 96) };
+            var gDisplay = new GroupBox { Text = "Display", Location = new Point(16, 50), Size = new Size(398, 128) };
             var lblMode = new Label { Text = "Mode:", Location = new Point(14, 28), AutoSize = true };
             cboMode = new ComboBox { Location = new Point(150, 24), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList };
             cboMode.Items.AddRange(DisplayModes);
             var lblRes = new Label { Text = "Resolution:", Location = new Point(14, 60), AutoSize = true };
             cboRes = new ComboBox { Location = new Point(150, 56), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList };
-            cboRes.Items.AddRange(Resolutions);
-            foreach (var c in new Control[] { lblMode, cboMode, lblRes, cboRes }) gDisplay.Controls.Add(c);
+            cboRes.Items.AddRange(SupportedResolutions());
+            var lblFont = new Label { Text = "Font:", Location = new Point(14, 92), AutoSize = true };
+            cboFont = new ComboBox { Location = new Point(150, 88), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList };
+            cboFont.Items.AddRange(AvailableFonts());
+            foreach (var c in new Control[] { lblMode, cboMode, lblRes, cboRes, lblFont, cboFont }) gDisplay.Controls.Add(c);
             Controls.Add(gDisplay);
             // Borderless always fills the monitor it launches on, so a resolution choice would be a
             // lie there; the other two both honour it.
             cboMode.SelectedIndexChanged += (s, e) => cboRes.Enabled = cboMode.SelectedIndex != ModeBorderless;
 
             // Effects
-            var gFx = new GroupBox { Text = "Effects", Location = new Point(16, 156), Size = new Size(398, 96) };
+            var gFx = new GroupBox { Text = "Effects", Location = new Point(16, 188), Size = new Size(398, 96) };
             cbSMAA = new CheckBox { Text = "SMAA (anti-alias)", Location = new Point(14, 26), AutoSize = true };
             cbSSAO = new CheckBox { Text = "SSAO", Location = new Point(160, 26), AutoSize = true };
             cbCel  = new CheckBox { Text = "Cel shading", Location = new Point(270, 26), AutoSize = true };
@@ -405,7 +479,7 @@ namespace Corellia
             Controls.Add(gFx);
 
             // Sharpening (post-process) — crisps the 3D scene; leaves the HUD/text overlay untouched.
-            var gSharp = new GroupBox { Text = "Sharpening (3D scene)", Location = new Point(16, 262), Size = new Size(398, 54) };
+            var gSharp = new GroupBox { Text = "Sharpening (3D scene)", Location = new Point(16, 294), Size = new Size(398, 54) };
             cbSceneSharpen = new CheckBox { Text = "Enabled", Location = new Point(14, 24), AutoSize = true };
             var lblS1 = new Label { Text = "Strength:", Location = new Point(150, 25), AutoSize = true };
             cboSceneSharpen = new ComboBox { Location = new Point(218, 21), Size = new Size(70, 24), DropDownStyle = ComboBoxStyle.DropDownList };
@@ -416,15 +490,15 @@ namespace Corellia
 
             // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
             // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
-            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 322), AutoSize = true };
+            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 354), AutoSize = true };
             Controls.Add(cbController);
 
             // Remember login — toggles the game's own ACCOUNT_CHECK / PASSWORD_CHECK registry flags
             // (like the native option). We never read or write the credentials themselves.
-            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 346), AutoSize = true };
+            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 378), AutoSize = true };
             Controls.Add(cbSaveLogin);
 
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 376), Size = new Size(130, 44) };
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 408), Size = new Size(130, 44) };
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -486,12 +560,29 @@ namespace Corellia
             cbController.Checked = AsBool(d, "ControllerPrompts", true);
             cbSaveLogin.Checked = ReadSaveLogin();
 
-            int w = ParseInt(d, "WindowWidth", 1600);
-            int h = ParseInt(d, "WindowHeight", 1200);
+            // Default to the desktop size rather than a fixed one: it is the only size guaranteed
+            // to be a real display mode on this machine.
+            var desktop = Screen.PrimaryScreen.Bounds;
+            int w = ParseInt(d, "WindowWidth", desktop.Width);
+            int h = ParseInt(d, "WindowHeight", desktop.Height);
             string res = w + " x " + h;
-            int idx = Array.IndexOf(Resolutions, res);
-            if (idx < 0) { cboRes.Items.Add(res); idx = cboRes.Items.Count - 1; }
-            cboRes.SelectedIndex = idx;
+            int idx = cboRes.Items.IndexOf(res);
+            if (idx < 0)
+            {
+                // The saved size is not a mode this display has, so the client would refuse to
+                // start on it. Do NOT add it back to the list -- that is how a player stays stuck
+                // on a config that silently does nothing. Fall back to the desktop size, which
+                // always works, and let Save write the correction out.
+                idx = cboRes.Items.IndexOf(desktop.Width + " x " + desktop.Height);
+                if (idx < 0) idx = cboRes.Items.Count - 1;
+            }
+            if (idx >= 0) cboRes.SelectedIndex = idx;
+
+            // Font lives in the game's own registry, not widescreen.cfg.
+            string font = ReadFont();
+            int fidx = cboFont.Items.IndexOf(font);
+            if (fidx < 0) fidx = cboFont.Items.IndexOf(DefaultFont);
+            if (fidx >= 0) cboFont.SelectedIndex = fidx;
 
             // DisplayMode is the current key; Windowed= is what pre-2026-08 configs carry and what
             // an older d3d8.dll still reads, so it is honoured on the way in and rewritten on the
@@ -557,6 +648,8 @@ namespace Corellia
             SetKey(lines, "WindowWidth", w.ToString());
             SetKey(lines, "WindowHeight", h.ToString());
 
+            WriteFont(cboFont.SelectedItem as string);
+
             File.WriteAllText(cfgPath, string.Join("\r\n", lines) + "\r\n");
         }
 
@@ -599,6 +692,38 @@ namespace Corellia
             // Return to the PSO launcher (online_e.exe hands off to Option and exits).
             Helpers.RelaunchOnline(dir);
             Close();
+        }
+
+        // ---- In-game font (the game's own FONT_JPN value) ----------------------
+        //
+        // ⚠ WRITTEN TO THIS BUILD'S OWN REGISTRY LEAF, never to the shared SonicTeam\PSOBB key.
+        // The client tree still ships font_tahoma.reg / font_verdana.reg / font_dotum.reg, and all
+        // three of those target PSOBB -- which since the per-build registry split is EPHINEA's key,
+        // not ours. Running one changes Ephinea's font and does nothing for Corellia. They should
+        // be dropped from the payload now that this dropdown exists; do not copy their target.
+        static string ReadFont()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(PsoRegPath))
+                {
+                    var v = k?.GetValue("FONT_JPN") as string;
+                    if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+                }
+            }
+            catch { }
+            return DefaultFont;
+        }
+
+        static void WriteFont(string font)
+        {
+            if (string.IsNullOrWhiteSpace(font)) font = DefaultFont;
+            try
+            {
+                using (var k = Registry.CurrentUser.CreateSubKey(PsoRegPath))
+                    k?.SetValue("FONT_JPN", font, RegistryValueKind.String);
+            }
+            catch { }
         }
 
         // ---- "Save ID and Password" (game's remember-login registry flags) -----
