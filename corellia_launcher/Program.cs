@@ -407,21 +407,49 @@ namespace Corellia
         // In-game font, stored as the game's own FONT_JPN registry string. "System" is a Windows
         // alias that always resolves, so it is both the default and the safe fallback; the rest are
         // offered only when actually installed, because naming a missing font gets a player nothing.
-        static readonly string[] FontCandidates = { "System", "Tahoma", "Verdana", "Dotum", "Gulim" };
         const string DefaultFont = "System";
 
+        // Offered first, when installed: the ones that actually suit this game. The rest of the
+        // machine's fonts follow alphabetically, so a player is not limited to our shortlist.
+        static readonly string[] PreferredFonts = { "Tahoma", "Verdana", "Arial", "Segoe UI", "MS Gothic", "MS UI Gothic", "Meiryo", "Yu Gothic", "Malgun Gothic", "Dotum", "Gulim" };
+
+        // Fonts whose glyphs are pictures, not letters. Choosing one turns every menu into
+        // dingbats, and the way back is the same unreadable menu -- so they are never offered.
+        static readonly string[] SymbolFonts = { "Wingdings", "Wingdings 2", "Wingdings 3", "Webdings", "Symbol", "Marlett", "Bookshelf Symbol 7", "MT Extra", "HoloLens MDL2 Assets", "Segoe MDL2 Assets", "Segoe Fluent Icons" };
+
+        /// <summary>Every font on this machine the game could sensibly use, best-known first.</summary>
         static string[] AvailableFonts()
         {
-            var installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // "System" is a GDI alias rather than a family, so it never appears in the collection.
+            // It always resolves, which is what makes it the safe default.
+            var list = new List<string> { DefaultFont };
+            var installed = new List<string>();
             try
             {
                 using (var c = new InstalledFontCollection())
                     foreach (var f in c.Families) installed.Add(f.Name);
             }
-            catch { }
-            // "System" is a GDI alias rather than a font family, so it never appears in the
-            // collection -- keep it unconditionally or the list would come back empty-ish.
-            return FontCandidates.Where(f => f == DefaultFont || installed.Contains(f)).ToArray();
+            catch
+            {
+                // No font enumeration means no informed choice; System alone still works.
+                return list.ToArray();
+            }
+
+            var skip = new HashSet<string>(SymbolFonts, StringComparer.OrdinalIgnoreCase);
+            var usable = installed
+                .Where(f => !skip.Contains(f))
+                .Where(f => !f.StartsWith("Segoe UI Variable", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var f in PreferredFonts)
+            {
+                var hit = usable.FirstOrDefault(u => string.Equals(u, f, StringComparison.OrdinalIgnoreCase));
+                if (hit != null) list.Add(hit);
+            }
+            list.AddRange(usable.Where(u => !list.Contains(u, StringComparer.OrdinalIgnoreCase))
+                                .OrderBy(u => u, StringComparer.OrdinalIgnoreCase));
+            return list.ToArray();
         }
 
         public MainForm()
