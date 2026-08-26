@@ -407,7 +407,27 @@ namespace Corellia
         // In-game font, stored as the game's own FONT_JPN registry string. "System" is a Windows
         // alias that always resolves, so it is both the default and the safe fallback; the rest are
         // offered only when actually installed, because naming a missing font gets a player nothing.
-        const string DefaultFont = "System";
+        // Always offered and always resolvable: "System" is a GDI alias rather than a family, so
+        // it never appears in the enumeration and can never be missing. Last-resort fallback.
+        const string AliasFont = "System";
+
+        // What a fresh install gets, best first. Verdana over Tahoma deliberately: it has a larger
+        // x-height and wider stems, so it stays crisper at the sizes PSO actually renders, and it
+        // covers every character the game's text uses (checked against the client's own text
+        // archive -- 110 distinct characters, nothing outside Latin-1).
+        //
+        // NOT "System". It is an alias, and it resolves to different typefaces on different
+        // machines -- Microsoft Sans Serif on Windows, something else again under Proton -- so it
+        // is the one choice that guarantees players do not see the same thing.
+        static readonly string[] DefaultFontPreference = { "Verdana", "Tahoma", AliasFont };
+
+        static string DefaultFontFor(IList<string> available)
+        {
+            foreach (var f in DefaultFontPreference)
+                if (available.Contains(f, StringComparer.OrdinalIgnoreCase))
+                    return f;
+            return AliasFont;
+        }
 
         // Offered first, when installed: the ones that actually suit this game. The rest of the
         // machine's fonts follow alphabetically, so a player is not limited to our shortlist.
@@ -422,7 +442,7 @@ namespace Corellia
         {
             // "System" is a GDI alias rather than a family, so it never appears in the collection.
             // It always resolves, which is what makes it the safe default.
-            var list = new List<string> { DefaultFont };
+            var list = new List<string> { AliasFont };
             var installed = new List<string>();
             try
             {
@@ -445,7 +465,7 @@ namespace Corellia
             foreach (var f in PreferredFonts)
             {
                 var hit = usable.FirstOrDefault(u => string.Equals(u, f, StringComparison.OrdinalIgnoreCase));
-                if (hit != null) list.Add(hit);
+                if (hit != null && !list.Contains(hit, StringComparer.OrdinalIgnoreCase)) list.Add(hit);
             }
             list.AddRange(usable.Where(u => !list.Contains(u, StringComparer.OrdinalIgnoreCase))
                                 .OrderBy(u => u, StringComparer.OrdinalIgnoreCase));
@@ -609,7 +629,7 @@ namespace Corellia
             // Font lives in the game's own registry, not widescreen.cfg.
             string font = ReadFont();
             int fidx = cboFont.Items.IndexOf(font);
-            if (fidx < 0) fidx = cboFont.Items.IndexOf(DefaultFont);
+            if (fidx < 0) fidx = cboFont.Items.IndexOf(DefaultFontFor(cboFont.Items.Cast<string>().ToList()));
             if (fidx >= 0) cboFont.SelectedIndex = fidx;
 
             // DisplayMode is the current key; Windowed= is what pre-2026-08 configs carry and what
@@ -740,12 +760,12 @@ namespace Corellia
                 }
             }
             catch { }
-            return DefaultFont;
+            return "";   // unset: the caller picks the default from what is installed
         }
 
         static void WriteFont(string font)
         {
-            if (string.IsNullOrWhiteSpace(font)) font = DefaultFont;
+            if (string.IsNullOrWhiteSpace(font)) font = DefaultFontFor(AvailableFonts());
             try
             {
                 using (var k = Registry.CurrentUser.CreateSubKey(PsoRegPath))
