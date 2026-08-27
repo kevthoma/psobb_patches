@@ -1,2 +1,4 @@
 tools/.psobb_inspect_state.json
 __pycache__/
+psobb_dsound/bin/
+psobb_dsound/build/

@@ -1,0 +1,25 @@
+; Export table for the proxy dsound.dll.
+;
+; psobb.exe imports DirectSoundCreate BY ORDINAL (#1), so the ordinals here must match the system
+; DLL exactly -- a name-only export table would leave the game's ordinal-1 import unresolved and
+; the process would fail to start. These twelve were read out of C:\Windows\SysWOW64\dsound.dll;
+; note DllCanUnloadNow / DllGetClassObject sit at @4 / @5, not at the end.
+;
+; NONAME is deliberately NOT used: the real DLL exports these by name as well as by ordinal, and
+; anything else in the process that resolves them by name (Wine/Proton included) must still work.
+
+LIBRARY dsound
+EXPORTS
+
+DirectSoundCreate             @1
+DirectSoundEnumerateA         @2
+DirectSoundEnumerateW         @3
+DllCanUnloadNow               @4
+DllGetClassObject             @5
+DirectSoundCaptureCreate      @6
+DirectSoundCaptureEnumerateA  @7
+DirectSoundCaptureEnumerateW  @8
+GetDeviceID                   @9
+DirectSoundFullDuplexCreate   @10
+DirectSoundCreate8            @11
+DirectSoundCaptureCreate8     @12

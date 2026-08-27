@@ -11,6 +11,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_moresaveslots", "psob
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "d3d8to9", "psobb_widescreen\d3d8to9.vcxproj", "{7EE21ADA-3B02-4CD6-A891-C2257A54B061}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_dsound", "psobb_dsound\msvc\psobb_dsound.vcxproj", "{96BA4682-7812-4DE1-AADB-FBB3DBA32BE7}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Win32 = Debug|Win32
@@ -33,6 +35,10 @@ Global
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Debug|Win32.Build.0 = Debug|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Release|Win32.ActiveCfg = Release|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Release|Win32.Build.0 = Release|Win32
+		{96BA4682-7812-4DE1-AADB-FBB3DBA32BE7}.Debug|Win32.ActiveCfg = Release|Win32
+		{96BA4682-7812-4DE1-AADB-FBB3DBA32BE7}.Debug|Win32.Build.0 = Release|Win32
+		{96BA4682-7812-4DE1-AADB-FBB3DBA32BE7}.Release|Win32.ActiveCfg = Release|Win32
+		{96BA4682-7812-4DE1-AADB-FBB3DBA32BE7}.Release|Win32.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

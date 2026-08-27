@@ -1,4 +1,4 @@
-// Corellia launcher + options — one binary, two roles chosen by its own filename:
+﻿// Corellia launcher + options — one binary, two roles chosen by its own filename:
 //
 //   * Corellia.exe            -> LAUNCHER: runs the Tailscale reachability preflight, applies the
 //                               controller-prompt texture per the saved setting, then opens online_e.exe
@@ -332,6 +332,7 @@ namespace Corellia
 
         ComboBox cboMode, cboRes, cboSceneSharpen, cboFont;
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin;
+        TrackBar tbMaster, tbMusic, tbEffects;
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
         // native "Save ID and Password" option toggled (remember game ID / remember password).
@@ -489,7 +490,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 468);
+            ClientSize = new Size(430, 604);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -536,21 +537,74 @@ namespace Corellia
             cbSceneSharpen.CheckedChanged += (s, e) => cboSceneSharpen.Enabled = cbSceneSharpen.Checked;
             Controls.Add(gSharp);
 
+            // Sound. The game itself has no volume control of any kind -- not in game, and the setup
+            // tool's sound page is switches only -- so these three are the only ones players get.
+            // They are read by our proxy dsound.dll, which scales every sound buffer the game
+            // creates. Music and effects are genuinely separable: the streaming buffers the music
+            // engine uses are distinguishable from one-shot effects, measured over 6,363 buffers.
+            // Values are percentages; the proxy converts to decibels, which is what DirectSound
+            // actually wants.
+            var gSound = new GroupBox { Text = "Sound", Location = new Point(16, 354), Size = new Size(398, 128) };
+            tbMaster = AddVolumeSlider(gSound, "Master:", 24);
+            tbMusic = AddVolumeSlider(gSound, "Music:", 56);
+            tbEffects = AddVolumeSlider(gSound, "Effects:", 88);
+            Controls.Add(gSound);
+
             // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
             // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
-            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 354), AutoSize = true };
+            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 490), AutoSize = true };
             Controls.Add(cbController);
 
             // Remember login — toggles the game's own ACCOUNT_CHECK / PASSWORD_CHECK registry flags
             // (like the native option). We never read or write the credentials themselves.
-            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 378), AutoSize = true };
+            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 514), AutoSize = true };
             Controls.Add(cbSaveLogin);
 
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 408), Size = new Size(130, 44) };
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 544), Size = new Size(130, 44) };
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
             AcceptButton = btnSave;
+        }
+
+        // One row of the Sound group: label, slider, live percentage readout. TrackBar has no
+        // continuous scale, so the slider works in steps of 5 -- fine for volume, and it keeps the
+        // tick marks legible.
+        static TrackBar AddVolumeSlider(GroupBox parent, string caption, int y)
+        {
+            var label = new Label { Text = caption, Location = new Point(14, y + 7), AutoSize = true };
+            var bar = new TrackBar {
+                // AutoSize defaults to TRUE on TrackBar, which makes it IGNORE Size and claim about
+                // 45px of height for its tick gutter. Three of those at 28px spacing overlapped each
+                // other, leaked stray tick marks into the neighbouring rows, and pushed the last
+                // slider through the bottom of the group box. Turn it off and take the height back.
+                AutoSize = false,
+                TickStyle = TickStyle.None,
+                Location = new Point(78, y),
+                Size = new Size(250, 30),
+                Minimum = 0,
+                Maximum = 100,
+                SmallChange = 5,
+                LargeChange = 20,
+                Value = 100,
+            };
+            var pct = new Label { Text = "100%", Location = new Point(338, y + 7), AutoSize = true };
+            bar.ValueChanged += (s, e) => {
+                bar.Value = (bar.Value / 5) * 5;
+                pct.Text = bar.Value + "%";
+            };
+            parent.Controls.Add(label);
+            parent.Controls.Add(bar);
+            parent.Controls.Add(pct);
+            return bar;
+        }
+
+        static void SetVolume(TrackBar bar, Dictionary<string, string> d, string key)
+        {
+            int v = 100;
+            if (d.TryGetValue(key, out var s) && int.TryParse(s.Trim(), out var i))
+                v = i < 0 ? 0 : (i > 100 ? 100 : i);
+            bar.Value = (v / 5) * 5;
         }
 
         void TryLoadIcon()
@@ -647,6 +701,11 @@ namespace Corellia
             }
             cboMode.SelectedIndex = mode;
             cboRes.Enabled = mode != ModeBorderless;
+
+            // Absent keys mean 100%, i.e. exactly how the game sounded before this feature existed.
+            SetVolume(tbMaster, d, "MasterVolume");
+            SetVolume(tbMusic, d, "MusicVolume");
+            SetVolume(tbEffects, d, "EffectVolume");
         }
 
         static int ParseInt(Dictionary<string, string> d, string key, int dflt)
@@ -677,6 +736,9 @@ namespace Corellia
             SetKey(lines, "SceneSharpen", cbSceneSharpen.Checked ? "1" : "0");
             SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.25");
             SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
+            SetKey(lines, "MasterVolume", tbMaster.Value.ToString());
+            SetKey(lines, "MusicVolume", tbMusic.Value.ToString());
+            SetKey(lines, "EffectVolume", tbEffects.Value.ToString());
             // HUD scaling is entangled with the widescreen layout math in the wrapper (non-1.0
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
             SetKey(lines, "HUDScale", "1.0");

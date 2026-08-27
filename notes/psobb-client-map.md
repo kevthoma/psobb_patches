@@ -233,7 +233,86 @@ same-count/same-dims swaps are safe? (2) will the client accept dims > 256² (do
 or fixed pixel rects)? Purely cosmetic attract-mode polish — low priority. Full-motion FMV (GC-style) would
 need hooking the client's movie player to bypass `.pae` entirely; not worth it.
 
-## Sound and volume — SURVEYED, not built (2026-08-19)
+## Sound and volume — PHASE 1 BUILT (2026-08-25), survey below from 2026-08-19
+
+**`psobb_dsound/` is the proxy `dsound.dll`.** Phase 1 is pure pass-through: twelve naked `jmp` stubs
+forwarding to `%WINDIR%\SysWOW64\dsound.dll`, resolved lazily on the first export call (never in
+`DllMain` — `LoadLibrary` under the loader lock is how proxy DLLs deadlock) and never by the bare name
+`dsound.dll`, which would load the proxy again. A `jmp` keeps the caller's stack and return address
+intact, so the real function does its own stdcall cleanup and returns straight to the game; that is why
+phase 1 can be behaviour-preserving for all twelve exports without declaring twelve signatures.
+
+**The ordinals are load-bearing and CI checks them.** The game resolves `DirectSoundCreate` by ordinal,
+so a `.def` that drifts from the system layout leaves the import unresolved and the client will not
+start, with no compile error anywhere. `tools/pe_exports.py check` diffs the built export table against
+the runner's own `SysWOW64\dsound.dll` on every build. Real layout (not what you would guess —
+`DllCanUnloadNow`/`DllGetClassObject` are @4/@5, not at the end): `DirectSoundCreate` @1,
+`DirectSoundEnumerateA/W` @2/@3, `DllCanUnloadNow` @4, `DllGetClassObject` @5,
+`DirectSoundCaptureCreate` @6, `DirectSoundCaptureEnumerateA/W` @7/@8, `GetDeviceID` @9,
+`DirectSoundFullDuplexCreate` @10, `DirectSoundCreate8` @11, `DirectSoundCaptureCreate8` @12.
+
+**Logging:** silent by default — creating an empty `dsound_proxy.log` next to the game executable opts
+in to a one-line "proxy active" record; failures are always logged. Same philosophy as the wrapper's
+`RecoveryLog` (a normal session must leave no file), and for the same reason: this ships to everyone.
+
+### Phase 2 census — RUN 2026-08-27. Music and effects ARE cleanly separable.
+
+26-minute session, **6,363 buffers**. Two independent signals agree on every single one:
+
+| class | count | rate | flags | duration |
+|---|---|---|---|---|
+| **streams (BGM)** | 24 | 44100 Hz, 2ch (3 were 1ch) | `0x18188`, **`GETCURRENTPOSITION2` set** | exactly 2.000 s or 4.000 s |
+| **effects** | 6,338 | 22050 Hz, 1ch | `0x8188` / `0x8198`, no `GETCURRENTPOSITION2` | 94 distinct irregular lengths |
+
+**`DSBCAPS_GETCURRENTPOSITION2` (`0x10000`) is the discriminator** — set on all 24 streams and none of
+the 6,338 effects; sample rate agrees perfectly. Exact round durations are the giveaway that the
+44.1 kHz buffers are rolling windows refilled by ADX, while effect buffers hold whole sounds. Streams
+appear in 2.000 s + 4.000 s pairs seconds apart, at plausible BGM-change moments.
+
+⚠ **Two things the pre-build plan got wrong, both now measured:**
+- **`DSBCAPS_STATIC` is never used — not on one buffer.** The "streaming vs static flags will separate
+  them" guess was right in conclusion, wrong in mechanism. Use `GETCURRENTPOSITION2`.
+- **The game already requests `DSBCAPS_CTRLVOLUME` on every buffer** (6,362 of 6,362; only the primary
+  buffer lacks it, and it has no format either). The planned "the proxy must ADD `CTRLVOLUME` at
+  creation or `SetVolume` fails" step is **unnecessary** — no descriptor rewriting in phase 3.
+
+**Phase 3 sizing, from the same data:** the client creates a **new buffer per playback** rather than
+reusing — 1,878 separate buffers for one 0.239 s sound — averaging ~4 per second. So volume has to be
+applied at creation, not only when a slider moves, and the per-creation path must stay cheap.
+`CTRL3D` further splits effects into 2,412 positional / 3,926 non-positional, if a third slider is ever
+wanted (probably not worth it).
+
+Still live from the plan: **DirectSound volume is hundredths of a dB, not linear** — a 0–100% slider
+needs `2000 * log10(fraction)` or 50% sounds nearly silent — and the game's own `SetVolume` calls must
+be **combined** with our scalar, not overwritten, or in-game fades break.
+
+### ⛔ The volume hotkey dead end — built, never worked, SHELVED 2026-08-27
+
+An in-game hotkey to change master volume was built and abandoned after three failed in-game tests.
+The launcher sliders shipped instead and are considered sufficient. **Code preserved on the
+`spike/volume-hotkey` branch** — start there, not from scratch.
+
+**What is known, and it is worth knowing before trying again:**
+
+- **Never bind a function key.** F1–F12 are already bound: Blue Burst has a per-player *"Function key
+  setting"* choosing whether they drive **menu shortcuts** or **chat shortcuts** (newserv documents
+  the bit at `src/SaveFileFormats.hh:586`). They are in use either way. This was the first attempt's
+  default and it was wrong.
+- **Polling cannot work in principle.** `GetAsyncKeyState` observes but does not consume, so the game
+  receives the key too and does both things at once. Any polled binding collides with whatever the
+  client already does with that key.
+- **A `WH_KEYBOARD_LL` hook installs fine and appears to receive nothing.** `SetWindowsHookExW`
+  succeeds (logged), the thread pumps messages, the bindings are correct in the log — and no press
+  ever produced a volume change, with a Windows menu beep indicating the key reached `DefWindowProc`
+  instead of being swallowed.
+- ⚠ **The instrumentation had a blind spot, and this is the single most useful thing to fix first.**
+  The diagnostic only logged keys that were *not* bound, so pressing the **bound** key produced no
+  line whether or not the callback ran. That leaves two very different hypotheses untested and
+  indistinguishable: the callback never fires at all, versus it fires and then fails its own
+  `GameHasFocus()` / `ModifierHeld()` checks. **Instrument the bound-key path before changing
+  anything else.**
+- Untested throughout: the **controller chord** (`BACK` + D-pad) shares none of the keyboard
+  machinery, so trying it alone would isolate hook problems from everything else in one step.
 
 The ask: **a volume control for players.** There is none anywhere today — not in game, not in the setup
 tool. What the client actually has:
@@ -250,7 +329,9 @@ tool. What the client actually has:
 
 | What | Address | Confidence | Source |
 |---|---|---|---|
-| `dsound.dll` import (ordinal #1, `DirectSoundCreate`) | `0x00B5E734` (`.idata`) | **Confirmed** | Parsed the import directory of our `psobb.exe` |
+| `dsound.dll` **IAT slot** — the pointer the game calls `DirectSoundCreate` through | `0x008F8068` (`.data`) | **Confirmed** | `tools/pe_exports.py imports PsoBB.exe dsound.dll` |
+| `dsound.dll` import descriptor / OFT | `0x00B5E028` / `0x00B5E180` (`.idata`) | **Confirmed** | Same parse — the import directory itself |
+| `"dsound.dll"` module-name string | `0x00B5E734` (`.idata`) | **Confirmed** | ⚠ CORRECTED 2026-08-25. This address was previously listed here as "the dsound import"; it is only the NAME STRING. Patching it does nothing at runtime — an IAT hook must target `0x008F8068`. |
 | `"Vol=Opt"` (ADX volume parameter string) | `0x0097A400` (`.data`) | **Confirmed** | String scan; the reference site is NOT yet located |
 | `"can't create ADXT-BGM #%d"` | `0x009893D4` (`.data`) | **Confirmed** | String scan — anchor into the BGM creation path |
 | `"SOUNDCTRL"` / `"FOCUS_SOUND"` registry key names | `0x009007E0` / `0x009007EC` (`.data`) | **Confirmed** | String scan — anchor into the settings load |
