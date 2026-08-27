@@ -73,6 +73,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\dllmain.cpp" />
+    <ClCompile Include="..\ds_wrapper.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\proxy.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\dsound.def" />

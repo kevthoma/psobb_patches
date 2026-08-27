@@ -1,9 +1,5 @@
 // psobb_dsound -- a proxy dsound.dll for PSOBB (59NL).
 //
-// PHASE 1: pure pass-through. Every export forwards to the real system dsound.dll and nothing
-// else happens. The point is to de-risk the LOAD PATH on its own: if the game starts and audio is
-// completely unchanged, the proxy is in place and later phases can wrap buffers with confidence.
-//
 // Why a proxy DLL at all: psobb.exe imports exactly ONE function from dsound.dll -- ordinal #1,
 // DirectSoundCreate (verified by parsing the import directory of our own client, not assumed).
 // Both the CRI ADX music stream and the effect buffers are created off that single device, so one
@@ -11,37 +7,26 @@
 // establishes this pattern three times over: d3d8.dll (our widescreen wrapper + ASI loader) and
 // dinput.dll / dinput8.dll (Xidi).
 //
-// Forwarding is done with naked jmp stubs rather than typed wrappers. A jmp leaves the caller's
-// stack and return address exactly as they were, so the real function cleans up its own stdcall
-// arguments and returns straight to the game. That makes phase 1 provably behaviour-preserving for
-// all twelve exports without declaring twelve signatures. Phase 3 replaces the DirectSoundCreate
-// stub with a real typed wrapper; the other eleven stay as they are forever.
+// PHASE 1 (done, tested in game): pure pass-through, to de-risk the load path on its own.
+// PHASE 2 (here): DirectSoundCreate returns a wrapper that LOGS every CreateSoundBuffer and
+//   changes nothing else -- see ds_wrapper.cpp for what the census is trying to settle.
+// PHASE 3: that same wrapper scales buffer volume.
 //
-// Ordinals matter: the game imports BY ORDINAL (#1), so the .def must reproduce the system DLL's
-// ordinal layout exactly. Those ordinals were read out of C:\Windows\SysWOW64\dsound.dll -- note
-// DllCanUnloadNow / DllGetClassObject are @4 / @5 here, which is not the order you would guess.
+// Eleven of the twelve exports are still naked jmp stubs. A jmp leaves the caller's stack and
+// return address exactly as they were, so the real function cleans up its own stdcall arguments
+// and returns straight to the game -- behaviour-preserving without declaring twelve signatures.
+// Only DirectSoundCreate is a real typed function, because only it has to wrap what it returns.
+//
+// Ordinals matter: the game imports BY ORDINAL, so the .def must reproduce the system DLL's
+// ordinal layout exactly, and CI diffs the built export table against SysWOW64\dsound.dll to
+// enforce it. Note DllCanUnloadNow / DllGetClassObject are @4 / @5, which is not the order you
+// would guess.
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "proxy.h"
 #include <stdio.h>
 #include <stdarg.h>
 
-// Export slots, in ordinal order (index = ordinal - 1). Populated on first use.
-enum {
-	IDX_DirectSoundCreate = 0,
-	IDX_DirectSoundEnumerateA,
-	IDX_DirectSoundEnumerateW,
-	IDX_DllCanUnloadNow,
-	IDX_DllGetClassObject,
-	IDX_DirectSoundCaptureCreate,
-	IDX_DirectSoundCaptureEnumerateA,
-	IDX_DirectSoundCaptureEnumerateW,
-	IDX_GetDeviceID,
-	IDX_DirectSoundFullDuplexCreate,
-	IDX_DirectSoundCreate8,
-	IDX_DirectSoundCaptureCreate8,
-	IDX_COUNT
-};
+FARPROC g_real[IDX_COUNT];
 
 static const char *const kExportNames[IDX_COUNT] = {
 	"DirectSoundCreate",
@@ -58,28 +43,50 @@ static const char *const kExportNames[IDX_COUNT] = {
 	"DirectSoundCaptureCreate8",
 };
 
-static FARPROC g_real[IDX_COUNT];
 static HMODULE g_realModule;
 static LONG g_loadState;  // 0 = untried, 1 = loading, 2 = loaded
 
 // ---------------------------------------------------------------------------------------------
 // Logging. Same philosophy as the widescreen wrapper's RecoveryLog: a normal session must leave no
-// file at all, because this ships to every player. So failures are always logged, and success is
-// logged only if someone opted in by creating the log file first (an empty dsound_proxy.log next
-// to the game executable turns it on). That gives a tester positive evidence the proxy is live
-// without making a log file appear on hundreds of machines that will never be looked at.
-static void ProxyLog(bool isFailure, const char *fmt, ...)
+// file at all, because this ships to every player. So failures are always logged, and everything
+// else only if someone opted in by creating the log file first (an empty dsound_proxy.log next to
+// the game executable turns it on). That gives a tester the census without making a log file
+// appear on hundreds of machines that will never be looked at.
+
+static bool LogPath(char *path, size_t cap)
 {
-	char path[MAX_PATH + 1];
+	if (cap < MAX_PATH + 1)
+		return false;
 	if (!GetModuleFileNameA(nullptr, path, MAX_PATH))
-		return;
+		return false;
 	path[MAX_PATH] = 0;
 	char *slash = strrchr(path, '\\');
 	if (!slash)
-		return;
+		return false;
 	strcpy(slash + 1, "dsound_proxy.log");
+	return true;
+}
 
-	if (!isFailure && GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+// Cached: the census writes a line per buffer, and hitting the filesystem to ask "is logging on"
+// each time would be a silly cost inside the game's audio path.
+bool CensusEnabled(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		char path[MAX_PATH + 1];
+		cached = (LogPath(path, sizeof(path)) &&
+			GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+	}
+	return cached == 1;
+}
+
+void ProxyLog(bool isFailure, const char *fmt, ...)
+{
+	char path[MAX_PATH + 1];
+	if (!LogPath(path, sizeof(path)))
+		return;
+
+	if (!isFailure && !CensusEnabled())
 		return;  // not opted in, and nothing is wrong -- stay silent
 
 	FILE *f = fopen(path, "a");
@@ -118,6 +125,10 @@ static void FatalProxyError(const char *what)
 // Deliberately not done in DllMain: LoadLibrary under the loader lock is how proxy DLLs deadlock.
 // The first export call happens well after DllMain has returned, on the thread that initialises
 // audio, so lazy resolution here is both safe and early enough.
+//
+// (GetSystemDirectoryA reports C:\Windows\system32 even in a 32-bit process; the WOW64 filesystem
+// redirector maps that to SysWOW64, so this does load the 32-bit DLL. The phase-1 log line saying
+// "system32" is expected, not a bug.)
 extern "C" void EnsureRealDsound(void)
 {
 	if (g_loadState == 2)
@@ -152,16 +163,39 @@ extern "C" void EnsureRealDsound(void)
 	if (!g_real[IDX_DirectSoundCreate])
 		FatalProxyError("the system dsound.dll has no DirectSoundCreate");
 
-	ProxyLog(false, "psobb_dsound proxy active; forwarding to %s (%d of %d exports resolved)",
-		path, IDX_COUNT - missing, IDX_COUNT);
+	ProxyLog(false, "psobb_dsound proxy active; forwarding to %s (%d of %d exports resolved)%s",
+		path, IDX_COUNT - missing, IDX_COUNT,
+		CensusEnabled() ? "; buffer census ON" : "");
 
 	InterlockedExchange(&g_loadState, 2);
 }
 
-// Each export: make sure the real DLL is loaded, then jump. EnsureRealDsound is __cdecl with no
-// arguments, so it needs no stack cleanup, and it preserves ebx/esi/edi/ebp per the C ABI. It may
-// clobber eax/ecx/edx, which is harmless: none of them carry stdcall arguments, and the callee we
-// jump to sets eax itself.
+// ---------------------------------------------------------------------------------------------
+// The one export that is not a pass-through: it has to wrap the device it returns.
+
+typedef HRESULT(WINAPI *PFN_DirectSoundCreate)(LPCGUID, LPDIRECTSOUND *, LPUNKNOWN);
+
+extern "C" HRESULT WINAPI DirectSoundCreate(LPCGUID pcGuidDevice, LPDIRECTSOUND *ppDS,
+	LPUNKNOWN pUnkOuter)
+{
+	EnsureRealDsound();
+
+	HRESULT hr = ((PFN_DirectSoundCreate)g_real[IDX_DirectSoundCreate])(
+		pcGuidDevice, ppDS, pUnkOuter);
+
+	if (SUCCEEDED(hr) && ppDS && *ppDS)
+		*ppDS = WrapDirectSound(*ppDS);
+	else
+		ProxyLog(false, "DirectSoundCreate returned hr=0x%08lX; nothing to wrap", hr);
+
+	return hr;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The other eleven: make sure the real DLL is loaded, then jump. EnsureRealDsound is __cdecl with
+// no arguments, so it needs no stack cleanup, and it preserves ebx/esi/edi/ebp per the C ABI. It
+// may clobber eax/ecx/edx, which is harmless: none of them carry stdcall arguments, and the callee
+// we jump to sets eax itself.
 #define PROXY_STUB(name, index)                          \
 	extern "C" __declspec(naked) void name(void)         \
 	{                                                    \
@@ -169,7 +203,6 @@ extern "C" void EnsureRealDsound(void)
 		__asm { jmp dword ptr [g_real + index * 4] }     \
 	}
 
-PROXY_STUB(DirectSoundCreate, IDX_DirectSoundCreate)
 PROXY_STUB(DirectSoundEnumerateA, IDX_DirectSoundEnumerateA)
 PROXY_STUB(DirectSoundEnumerateW, IDX_DirectSoundEnumerateW)
 PROXY_STUB(DllCanUnloadNow, IDX_DllCanUnloadNow)
