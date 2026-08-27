@@ -3,7 +3,20 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+
+// The naked forwarding stubs (stubs.cpp) define functions with the same NAMES as the real
+// dsound exports but a deliberately signature-free `void f(void)` shape -- they jump rather than
+// call, so they never need the real prototypes. That collides with dsound.h's own declarations of
+// DirectSoundEnumerateA, DllCanUnloadNow and friends, so stubs.cpp defines PROXY_NO_DSOUND and
+// skips the header it does not need. Everything that actually touches DirectSound types leaves it
+// undefined and gets the real declarations.
+//
+// mmsystem.h comes first because WIN32_LEAN_AND_MEAN excludes it, and dsound.h needs WAVEFORMATEX
+// from it -- without it dsound.h fails to compile with a wall of "missing type specifier".
+#ifndef PROXY_NO_DSOUND
+#include <mmsystem.h>
 #include <dsound.h>
+#endif
 
 // Export slots, in ordinal order (index = ordinal - 1). The ordinals are the system DLL's, not a
 // guess: the game imports DirectSoundCreate BY ORDINAL, and CI diffs our export table against
@@ -38,6 +51,8 @@ void ProxyLog(bool isFailure, const char *fmt, ...);
 // the per-buffer path does not stat the disk.
 bool CensusEnabled(void);
 
+#ifndef PROXY_NO_DSOUND
 // Wraps a real IDirectSound so CreateSoundBuffer can be observed (phase 2) and, later, scaled
 // (phase 3). Returns the wrapper, or the original pointer if wrapping is not possible.
 IDirectSound *WrapDirectSound(IDirectSound *real);
+#endif

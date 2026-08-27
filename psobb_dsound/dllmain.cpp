@@ -191,29 +191,8 @@ extern "C" HRESULT WINAPI DirectSoundCreate(LPCGUID pcGuidDevice, LPDIRECTSOUND 
 	return hr;
 }
 
-// ---------------------------------------------------------------------------------------------
-// The other eleven: make sure the real DLL is loaded, then jump. EnsureRealDsound is __cdecl with
-// no arguments, so it needs no stack cleanup, and it preserves ebx/esi/edi/ebp per the C ABI. It
-// may clobber eax/ecx/edx, which is harmless: none of them carry stdcall arguments, and the callee
-// we jump to sets eax itself.
-#define PROXY_STUB(name, index)                          \
-	extern "C" __declspec(naked) void name(void)         \
-	{                                                    \
-		__asm { call EnsureRealDsound }                  \
-		__asm { jmp dword ptr [g_real + index * 4] }     \
-	}
-
-PROXY_STUB(DirectSoundEnumerateA, IDX_DirectSoundEnumerateA)
-PROXY_STUB(DirectSoundEnumerateW, IDX_DirectSoundEnumerateW)
-PROXY_STUB(DllCanUnloadNow, IDX_DllCanUnloadNow)
-PROXY_STUB(DllGetClassObject, IDX_DllGetClassObject)
-PROXY_STUB(DirectSoundCaptureCreate, IDX_DirectSoundCaptureCreate)
-PROXY_STUB(DirectSoundCaptureEnumerateA, IDX_DirectSoundCaptureEnumerateA)
-PROXY_STUB(DirectSoundCaptureEnumerateW, IDX_DirectSoundCaptureEnumerateW)
-PROXY_STUB(GetDeviceID, IDX_GetDeviceID)
-PROXY_STUB(DirectSoundFullDuplexCreate, IDX_DirectSoundFullDuplexCreate)
-PROXY_STUB(DirectSoundCreate8, IDX_DirectSoundCreate8)
-PROXY_STUB(DirectSoundCaptureCreate8, IDX_DirectSoundCaptureCreate8)
+// The other eleven exports are naked jmp stubs in stubs.cpp, which deliberately does not include
+// dsound.h -- see the comment at the top of that file.
 
 BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD dwReason, LPVOID lpReserved)
 {

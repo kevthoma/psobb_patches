@@ -74,6 +74,7 @@
   <ItemGroup>
     <ClCompile Include="..\dllmain.cpp" />
     <ClCompile Include="..\ds_wrapper.cpp" />
+    <ClCompile Include="..\stubs.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\proxy.h" />
