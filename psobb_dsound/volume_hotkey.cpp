@@ -11,14 +11,22 @@
 // landed straight in that same trap, on a build where the Steam Deck made pad-only play a real
 // configuration. So the chord is here from the first commit rather than promised for later.
 //
-// A polling thread rather than a hook: the proxy has no message loop and no frame tick of its own,
-// and a low-level keyboard hook would be both heavier and far more intrusive than reading key state
-// twenty times a second.
+// ⚠ WHY THE KEYBOARD SIDE IS A HOOK AND NOT A POLL, AND WHY THE DEFAULT IS NOT A FUNCTION KEY:
+// F1-F12 are ALREADY BOUND in this client. Blue Burst has a per-player "Function key setting"
+// choosing whether they drive menu shortcuts or chat shortcuts (newserv documents the bit in
+// SaveFileFormats.hh), so the function keys are in use either way -- they were the worst possible
+// default and the first version of this file had them. Polling with GetAsyncKeyState observes but
+// does not consume, so the game would have received the key as well and done both things at once.
 //
-// ⚠ THE GAME STILL SEES THE INPUT. GetAsyncKeyState observes, it does not consume, so whatever the
-// bindings are bound to in game ALSO happens. That is why the defaults are F11/F12 -- function keys
-// the client has no use for -- and why every binding is configurable in widescreen.cfg rather than
-// baked in.
+// A WH_KEYBOARD_LL hook can return 1 to swallow the key, so the binding is ours alone. Two things
+// follow from that, both handled:
+//   * The default requires a MODIFIER (Alt) so that nothing is swallowed while the player is typing
+//     in chat -- nobody holds Alt to type. Without a modifier, binding a key that produces text
+//     would eat that character out of chat messages.
+//   * The hook callback does almost nothing: it records the request and returns. Windows silently
+//     drops a low-level hook whose thread does not answer within LowLevelHooksTimeout, and applying
+//     a volume change walks live buffers and rewrites widescreen.cfg -- far too much to do inside
+//     the callback. The polling thread drains the request instead.
 
 #include "proxy.h"
 #include <xinput.h>
@@ -27,10 +35,14 @@
 extern LONG g_hotkeyEnabled;
 extern LONG g_hotkeyDown;
 extern LONG g_hotkeyUp;
+extern LONG g_hotkeyMod;
 extern LONG g_hotkeyStep;
 
 typedef DWORD(WINAPI *PFN_XInputGetState)(DWORD, XINPUT_STATE *);
 static PFN_XInputGetState g_xinput;
+
+// Steps requested by the hook and not yet applied. Signed: negative is quieter.
+static LONG g_pendingSteps;
 
 // The controller chord: BACK held, then D-pad up or down. BACK is a modifier here rather than an
 // action, so a pad player cannot nudge the volume by accident while moving, and the D-pad keeps the
@@ -49,7 +61,8 @@ static void LoadXInput(void)
 }
 
 // Only react while the game is the foreground window. Without this, pressing the key in a browser
-// would quietly change the volume of a game running behind it.
+// would quietly change the volume of a game running behind it -- and, worse for a hook, would eat
+// the keystroke out of whatever the player was actually typing into.
 static bool GameHasFocus(void)
 {
 	HWND fg = GetForegroundWindow();
@@ -60,25 +73,68 @@ static bool GameHasFocus(void)
 	return pid == GetCurrentProcessId();
 }
 
-static DWORD WINAPI VolumeHotkeyThread(LPVOID)
+static bool ModifierHeld(void)
+{
+	switch (g_hotkeyMod) {
+	case 1: return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+	case 2: return (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+	case 3: return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+	default: return true;  // no modifier configured
+	}
+}
+
+static LRESULT CALLBACK KeyboardHook(int code, WPARAM wParam, LPARAM lParam)
+{
+	if (code == HC_ACTION) {
+		const KBDLLHOOKSTRUCT *k = (const KBDLLHOOKSTRUCT *)lParam;
+		bool isOurs = (k->vkCode == (DWORD)g_hotkeyDown || k->vkCode == (DWORD)g_hotkeyUp);
+
+		if (isOurs && GameHasFocus() && ModifierHeld()) {
+			// Alt-modified keys arrive as WM_SYSKEY*, so both forms have to be matched.
+			bool isDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+			bool isUp = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+
+			// Auto-repeat is fine here: holding the key ramps the volume, which is what a player
+			// expects from a control with no on-screen readout.
+			if (isDown)
+				InterlockedExchangeAdd(&g_pendingSteps,
+					k->vkCode == (DWORD)g_hotkeyUp ? 1 : -1);
+
+			// Swallow the release as well, or the game sees a key-up it never saw a key-down for.
+			if (isDown || isUp)
+				return 1;
+		}
+	}
+	return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+// The hook has to live on a thread that pumps messages, so this thread owns both the hook and the
+// message loop. The controller is polled from the same loop via a timer, which keeps the whole
+// feature on one thread.
+static DWORD WINAPI VolumeInputThread(LPVOID)
 {
 	LoadXInput();
 
-	bool prevDown = false, prevUp = false;
-	for (;;) {
-		Sleep(50);
+	HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHook, GetModuleHandleW(nullptr), 0);
+	if (!hook)
+		ProxyLog(true, "could not install the keyboard hook (GetLastError=%lu); the volume key is "
+			"unavailable, the controller chord still works", GetLastError());
 
-		if (!GameHasFocus()) {
-			// Drop the edge state, so releasing a key while alt-tabbed away cannot register as a
-			// press when the player comes back.
-			prevDown = prevUp = false;
+	UINT_PTR timer = SetTimer(nullptr, 0, 50, nullptr);
+	bool prevPadDown = false, prevPadUp = false;
+
+	MSG msg;
+	while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+		if (msg.message != WM_TIMER) {
+			TranslateMessage(&msg);
+			DispatchMessageW(&msg);
 			continue;
 		}
 
-		bool down = (GetAsyncKeyState((int)g_hotkeyDown) & 0x8000) != 0;
-		bool up = (GetAsyncKeyState((int)g_hotkeyUp) & 0x8000) != 0;
+		int steps = (int)InterlockedExchange(&g_pendingSteps, 0);
 
-		if (g_xinput) {
+		if (g_xinput && GameHasFocus()) {
+			bool padDown = false, padUp = false;
 			XINPUT_STATE st;
 			for (DWORD pad = 0; pad < 4; pad++) {
 				if (g_xinput(pad, &st) != ERROR_SUCCESS)
@@ -86,23 +142,30 @@ static DWORD WINAPI VolumeHotkeyThread(LPVOID)
 				WORD b = st.Gamepad.wButtons;
 				if (b & XINPUT_GAMEPAD_BACK) {
 					if (b & XINPUT_GAMEPAD_DPAD_DOWN)
-						down = true;
+						padDown = true;
 					if (b & XINPUT_GAMEPAD_DPAD_UP)
-						up = true;
+						padUp = true;
 				}
 			}
+			// Edge-triggered on the pad: the D-pad has no auto-repeat to inherit, so holding it
+			// would otherwise slam the volume to an end stop in a second.
+			if (padDown && !prevPadDown)
+				steps--;
+			if (padUp && !prevPadUp)
+				steps++;
+			prevPadDown = padDown;
+			prevPadUp = padUp;
 		}
 
-		// Edge-triggered: one step per press. Holding the key does not ramp, which is the right
-		// call for a control with no on-screen readout -- the player adjusts, listens, adjusts.
-		if (down && !prevDown)
-			SetMasterVolume(GetVolumeConfig().master - (int)g_hotkeyStep);
-		if (up && !prevUp)
-			SetMasterVolume(GetVolumeConfig().master + (int)g_hotkeyStep);
-
-		prevDown = down;
-		prevUp = up;
+		if (steps)
+			SetMasterVolume(GetVolumeConfig().master + steps * (int)g_hotkeyStep);
 	}
+
+	if (timer)
+		KillTimer(nullptr, timer);
+	if (hook)
+		UnhookWindowsHookEx(hook);
+	return 0;
 }
 
 void StartVolumeHotkeyThread(void)
@@ -118,14 +181,16 @@ void StartVolumeHotkeyThread(void)
 		return;
 	}
 
-	HANDLE h = CreateThread(nullptr, 0, VolumeHotkeyThread, nullptr, 0, nullptr);
+	HANDLE h = CreateThread(nullptr, 0, VolumeInputThread, nullptr, 0, nullptr);
 	if (!h) {
-		ProxyLog(true, "could not start the volume hotkey thread (GetLastError=%lu)",
+		ProxyLog(true, "could not start the volume input thread (GetLastError=%lu)",
 			GetLastError());
 		return;
 	}
 	CloseHandle(h);
-	ProxyLog(false, "volume hotkey active: key 0x%02X down / 0x%02X up, or hold BACK and press "
-		"D-pad down/up on a controller; %d%% per press",
-		(int)g_hotkeyDown, (int)g_hotkeyUp, (int)g_hotkeyStep);
+
+	static const char *const kMods[] = { "no modifier", "Ctrl", "Alt", "Shift" };
+	ProxyLog(false, "volume hotkey active: %s + key 0x%02X down / 0x%02X up (swallowed, the game "
+		"does not see them), or hold BACK and press D-pad down/up on a controller; %d%% per press",
+		kMods[g_hotkeyMod & 3], (int)g_hotkeyDown, (int)g_hotkeyUp, (int)g_hotkeyStep);
 }

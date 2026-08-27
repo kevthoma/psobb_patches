@@ -216,8 +216,9 @@ static LONG g_cfgLoaded = 0;
 // The hotkey's own configuration, read from the same file. VolumeHotkey=0 turns the whole thing off
 // for anyone who would rather the keys did nothing.
 LONG g_hotkeyEnabled = 1;
-LONG g_hotkeyDown = VK_F11;
-LONG g_hotkeyUp = VK_F12;
+LONG g_hotkeyDown = VK_SUBTRACT;   // numpad minus
+LONG g_hotkeyUp = VK_ADD;          // numpad plus
+LONG g_hotkeyMod = 2;              // 0 = none, 1 = Ctrl, 2 = Alt, 3 = Shift
 LONG g_hotkeyStep = 5;
 
 static void LoadConfigOnce(void)
@@ -249,8 +250,9 @@ static void LoadConfigOnce(void)
 	g_effects = ReadCfgInt(buf, "EffectVolume", 100, 0, 100);
 
 	g_hotkeyEnabled = ReadCfgInt(buf, "VolumeHotkey", 1, 0, 1);
-	g_hotkeyDown = ReadCfgInt(buf, "VolumeKeyDown", VK_F11, 0, 255);
-	g_hotkeyUp = ReadCfgInt(buf, "VolumeKeyUp", VK_F12, 0, 255);
+	g_hotkeyDown = ReadCfgInt(buf, "VolumeKeyDown", VK_SUBTRACT, 0, 255);
+	g_hotkeyUp = ReadCfgInt(buf, "VolumeKeyUp", VK_ADD, 0, 255);
+	g_hotkeyMod = ReadCfgInt(buf, "VolumeKeyModifier", 2, 0, 3);
 	g_hotkeyStep = ReadCfgInt(buf, "VolumeStep", 5, 1, 50);
 }
 
