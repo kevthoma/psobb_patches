@@ -229,7 +229,7 @@ static void LoadConfigOnce(void)
 	if (!GetModuleFileNameA(nullptr, path, MAX_PATH))
 		return;
 	path[MAX_PATH] = 0;
-	char *slash = strrchr(path, '\');
+	char *slash = strrchr(path, '\\');
 	if (!slash)
 		return;
 	strcpy(slash + 1, "widescreen.cfg");
@@ -273,7 +273,7 @@ static void PersistMasterVolume(int percent)
 	if (!GetModuleFileNameA(nullptr, path, MAX_PATH))
 		return;
 	path[MAX_PATH] = 0;
-	char *slash = strrchr(path, '\');
+	char *slash = strrchr(path, '\\');
 	if (!slash)
 		return;
 	strcpy(slash + 1, "widescreen.cfg");
@@ -293,8 +293,7 @@ static void PersistMasterVolume(int percent)
 	const char *p = buf;
 	while (*p) {
 		const char *eol = p;
-		while (*eol && *eol != '
-')
+		while (*eol && *eol != '\n')
 			eol++;
 		size_t len = (size_t)(eol - p) + (*eol ? 1 : 0);
 
@@ -303,8 +302,7 @@ static void PersistMasterVolume(int percent)
 			k++;
 		if (_strnicmp(k, "MasterVolume", 12) == 0) {
 			int w = _snprintf_s(out + used, sizeof(out) - used, _TRUNCATE,
-				"MasterVolume=%d
-", percent);
+				"MasterVolume=%d\n", percent);
 			if (w > 0)
 				used += w;
 			replaced = true;
@@ -316,8 +314,7 @@ static void PersistMasterVolume(int percent)
 	}
 	if (!replaced) {
 		int w = _snprintf_s(out + used, sizeof(out) - used, _TRUNCATE,
-			"MasterVolume=%d
-", percent);
+			"MasterVolume=%d\n", percent);
 		if (w > 0)
 			used += w;
 	}
