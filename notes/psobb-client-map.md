@@ -255,8 +255,36 @@ the runner's own `SysWOW64\dsound.dll` on every build. Real layout (not what you
 in to a one-line "proxy active" record; failures are always logged. Same philosophy as the wrapper's
 `RecoveryLog` (a normal session must leave no file), and for the same reason: this ships to everyone.
 
-Phase 2 (buffer census — does `CreateSoundBuffer` separate BGM from effects?) is the next step and is
-the thing that decides whether separate music/effects sliders are possible at all.
+### Phase 2 census — RUN 2026-08-27. Music and effects ARE cleanly separable.
+
+26-minute session, **6,363 buffers**. Two independent signals agree on every single one:
+
+| class | count | rate | flags | duration |
+|---|---|---|---|---|
+| **streams (BGM)** | 24 | 44100 Hz, 2ch (3 were 1ch) | `0x18188`, **`GETCURRENTPOSITION2` set** | exactly 2.000 s or 4.000 s |
+| **effects** | 6,338 | 22050 Hz, 1ch | `0x8188` / `0x8198`, no `GETCURRENTPOSITION2` | 94 distinct irregular lengths |
+
+**`DSBCAPS_GETCURRENTPOSITION2` (`0x10000`) is the discriminator** — set on all 24 streams and none of
+the 6,338 effects; sample rate agrees perfectly. Exact round durations are the giveaway that the
+44.1 kHz buffers are rolling windows refilled by ADX, while effect buffers hold whole sounds. Streams
+appear in 2.000 s + 4.000 s pairs seconds apart, at plausible BGM-change moments.
+
+⚠ **Two things the pre-build plan got wrong, both now measured:**
+- **`DSBCAPS_STATIC` is never used — not on one buffer.** The "streaming vs static flags will separate
+  them" guess was right in conclusion, wrong in mechanism. Use `GETCURRENTPOSITION2`.
+- **The game already requests `DSBCAPS_CTRLVOLUME` on every buffer** (6,362 of 6,362; only the primary
+  buffer lacks it, and it has no format either). The planned "the proxy must ADD `CTRLVOLUME` at
+  creation or `SetVolume` fails" step is **unnecessary** — no descriptor rewriting in phase 3.
+
+**Phase 3 sizing, from the same data:** the client creates a **new buffer per playback** rather than
+reusing — 1,878 separate buffers for one 0.239 s sound — averaging ~4 per second. So volume has to be
+applied at creation, not only when a slider moves, and the per-creation path must stay cheap.
+`CTRL3D` further splits effects into 2,412 positional / 3,926 non-positional, if a third slider is ever
+wanted (probably not worth it).
+
+Still live from the plan: **DirectSound volume is hundredths of a dB, not linear** — a 0–100% slider
+needs `2000 * log10(fraction)` or 50% sounds nearly silent — and the game's own `SetVolume` calls must
+be **combined** with our scalar, not overwritten, or in-game fades break.
 
 The ask: **a volume control for players.** There is none anywhere today — not in game, not in the setup
 tool. What the client actually has:
