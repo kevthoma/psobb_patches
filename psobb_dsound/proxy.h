@@ -51,8 +51,30 @@ void ProxyLog(bool isFailure, const char *fmt, ...);
 // the per-buffer path does not stat the disk.
 bool CensusEnabled(void);
 
+// The player's settings, as percentages 0-100. Read once from widescreen.cfg (the same file the
+// widescreen wrapper and the launcher already share) the first time audio is touched. Phase 3 has
+// no live updates by design: the sliders live in the launcher, so the values cannot change while
+// the game is running. The in-game hotkey in phase 3b is what will need a live path, and a
+// registry of open buffers to go with it.
+struct VolumeConfig {
+	int master;
+	int music;
+	int effects;
+};
+const VolumeConfig &GetVolumeConfig(void);
+
 #ifndef PROXY_NO_DSOUND
-// Wraps a real IDirectSound so CreateSoundBuffer can be observed (phase 2) and, later, scaled
-// (phase 3). Returns the wrapper, or the original pointer if wrapping is not possible.
+// Wraps a real IDirectSound so CreateSoundBuffer can be observed and scaled.
 IDirectSound *WrapDirectSound(IDirectSound *real);
+
+// Wraps one sound buffer so its volume carries the player's setting. isMusic selects which slider
+// applies -- see the census note in ds_buffer.cpp for how that is decided.
+IDirectSoundBuffer *WrapSoundBuffer(IDirectSoundBuffer *real, bool isMusic);
+
+// Recognises one of our own buffer wrappers and reports the real buffer behind it plus its
+// category. False if this is not our object. Needed wherever the game hands a buffer back to us.
+bool UnwrapSoundBuffer(IDirectSoundBuffer *maybeWrapper, IDirectSoundBuffer **real, bool *isMusic);
+
+// The attenuation for a category, in hundredths of a decibel (<= 0). Exposed for logging.
+LONG VolumeOffsetFor(bool isMusic);
 #endif

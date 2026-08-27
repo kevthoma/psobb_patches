@@ -164,11 +164,23 @@ public:
 	STDMETHOD(CreateSoundBuffer)(LPCDSBUFFERDESC desc, LPDIRECTSOUNDBUFFER *ppBuffer,
 		LPUNKNOWN pUnkOuter) override
 	{
-		// Phase 2 observes and does not intervene: the descriptor is passed through exactly as the
-		// game supplied it, and the buffer that comes back is handed over unwrapped.
+		// The descriptor is still passed through byte for byte. The census proved the game already
+		// requests DSBCAPS_CTRLVOLUME on every buffer, so there is nothing we need to add to it --
+		// which keeps this the observation-only path it was in phase 2, plus a wrapper on the way
+		// out.
 		HRESULT hr = m_real->CreateSoundBuffer(desc, ppBuffer, pUnkOuter);
 		unsigned index = (unsigned)InterlockedIncrement(&m_buffers);
 		LogBufferDesc("CreateSoundBuffer", desc, hr, index);
+
+		if (SUCCEEDED(hr) && ppBuffer && *ppBuffer && desc) {
+			// The primary buffer is the mixer's own output, not a sound: scaling it would apply
+			// the setting a second time on top of every already-scaled buffer. It is also the one
+			// buffer the game creates WITHOUT CTRLVOLUME, so SetVolume on it would fail anyway.
+			if (!(desc->dwFlags & DSBCAPS_PRIMARYBUFFER)) {
+				bool isMusic = (desc->dwFlags & DSBCAPS_GETCURRENTPOSITION2) != 0;
+				*ppBuffer = WrapSoundBuffer(*ppBuffer, isMusic);
+			}
+		}
 		return hr;
 	}
 
@@ -177,12 +189,25 @@ public:
 	STDMETHOD(DuplicateSoundBuffer)(LPDIRECTSOUNDBUFFER original,
 		LPDIRECTSOUNDBUFFER *duplicate) override
 	{
-		HRESULT hr = m_real->DuplicateSoundBuffer(original, duplicate);
-		// Worth knowing: duplicates share the original's memory but get their own volume, which is
-		// how a game plays the same effect several times at once. If the client leans on this, the
-		// phase-3 volume pass has to cover duplicates too, not just created buffers.
-		if (CensusEnabled())
-			ProxyLog(false, "DuplicateSoundBuffer -> hr=0x%08lX", hr);
+		// The census recorded no calls to this in a 26-minute session, so this path is written for
+		// correctness rather than because it is known to run. `original` will be one of OUR
+		// wrappers, and handing that to the real DirectSound would be a bug in its own right --
+		// the real implementation expects its own object, not a stand-in. Unwrap first, and carry
+		// the original's music/effect classification onto the duplicate, which needs it: a
+		// duplicate shares the source's memory but carries its own independent volume.
+		IDirectSoundBuffer *realOriginal = original;
+		bool isMusic = false;
+		bool wasOurs = UnwrapSoundBuffer(original, &realOriginal, &isMusic);
+
+		HRESULT hr = m_real->DuplicateSoundBuffer(realOriginal, duplicate);
+
+		if (SUCCEEDED(hr) && duplicate && *duplicate && wasOurs)
+			*duplicate = WrapSoundBuffer(*duplicate, isMusic);
+
+		ProxyLog(!wasOurs && SUCCEEDED(hr),
+			"DuplicateSoundBuffer -> hr=0x%08lX (source %s ours, %s)",
+			hr, wasOurs ? "was" : "was NOT",
+			wasOurs ? (isMusic ? "music" : "effect") : "duplicate plays unscaled");
 		return hr;
 	}
 

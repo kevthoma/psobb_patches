@@ -163,11 +163,82 @@ extern "C" void EnsureRealDsound(void)
 	if (!g_real[IDX_DirectSoundCreate])
 		FatalProxyError("the system dsound.dll has no DirectSoundCreate");
 
-	ProxyLog(false, "psobb_dsound proxy active; forwarding to %s (%d of %d exports resolved)%s",
+	const VolumeConfig &vc = GetVolumeConfig();
+	ProxyLog(false, "psobb_dsound proxy active; forwarding to %s (%d of %d exports resolved)%s; "
+		"volume master=%d%% music=%d%% effects=%d%%",
 		path, IDX_COUNT - missing, IDX_COUNT,
-		CensusEnabled() ? "; buffer census ON" : "");
+		CensusEnabled() ? "; buffer census ON" : "",
+		vc.master, vc.music, vc.effects);
 
 	InterlockedExchange(&g_loadState, 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The player's settings.
+//
+// widescreen.cfg is chosen over a file of our own because it is already the one place the launcher
+// writes and the client-side wrapper reads -- a second config file would be a second thing for a
+// player to lose. Values are percentages; anything missing or unparseable falls back to 100, which
+// means "sound exactly as it was before this feature existed".
+
+static int ReadCfgPercent(const char *text, const char *key, int dflt)
+{
+	size_t keyLen = strlen(key);
+	for (const char *p = text; *p; ) {
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (_strnicmp(p, key, keyLen) == 0) {
+			const char *q = p + keyLen;
+			while (*q == ' ' || *q == '\t')
+				q++;
+			if (*q == '=') {
+				int v = atoi(q + 1);
+				if (v < 0)
+					v = 0;
+				if (v > 100)
+					v = 100;
+				return v;
+			}
+		}
+		while (*p && *p != '\n')
+			p++;
+		if (*p)
+			p++;
+	}
+	return dflt;
+}
+
+const VolumeConfig &GetVolumeConfig(void)
+{
+	static VolumeConfig cfg = { 100, 100, 100 };
+	static bool loaded = false;
+	if (loaded)
+		return cfg;
+	loaded = true;
+
+	char path[MAX_PATH + 1];
+	if (!GetModuleFileNameA(nullptr, path, MAX_PATH))
+		return cfg;
+	path[MAX_PATH] = 0;
+	char *slash = strrchr(path, '\\');
+	if (!slash)
+		return cfg;
+	strcpy(slash + 1, "widescreen.cfg");
+
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		ProxyLog(false, "no widescreen.cfg; volume stays at 100%% on all three");
+		return cfg;
+	}
+	char buf[8192];
+	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	buf[n] = 0;
+
+	cfg.master  = ReadCfgPercent(buf, "MasterVolume", 100);
+	cfg.music   = ReadCfgPercent(buf, "MusicVolume", 100);
+	cfg.effects = ReadCfgPercent(buf, "EffectVolume", 100);
+	return cfg;
 }
 
 // ---------------------------------------------------------------------------------------------
