@@ -40,40 +40,10 @@ static LONG FractionToDb(double fraction)
 
 LONG VolumeOffsetFor(bool isMusic)
 {
-	VolumeConfig c = GetVolumeConfig();
+	const VolumeConfig &c = GetVolumeConfig();
 	double master = c.master / 100.0;
 	double category = (isMusic ? c.music : c.effects) / 100.0;
 	return FractionToDb(master * category);
-}
-
-// The registry of buffers that exist right now.
-//
-// Phase 3 applied volume at creation and on the game's own SetVolume, which was enough while the
-// only way to change a setting was to quit to the launcher. The in-game hotkey needs to reach
-// buffers that already exist -- above all the music stream, which is created once and then plays
-// for minutes -- so wrappers link themselves into this list for as long as they live.
-//
-// An intrusive doubly-linked list rather than a container: insert and remove are both O(1) and
-// allocation-free, which matters because the client creates a new buffer per playback, about four a
-// second, rather than reusing them.
-static CRITICAL_SECTION g_listLock;
-static LONG g_listReady = 0;
-
-static void EnsureListLock(void)
-{
-	// Racy-looking but not: the first buffer is created long before any second audio thread exists,
-	// and InitializeCriticalSection on an already-initialised section is the only thing being
-	// guarded against.
-	if (InterlockedCompareExchange(&g_listReady, 1, 0) == 0)
-		InitializeCriticalSection(&g_listLock);
-}
-
-// Forward declarations, inside the same anonymous namespace the definitions end up in: declaring
-// them at global scope instead makes them different functions and the call ambiguous.
-namespace {
-class SoundBufferProxy;
-void RegisterBuffer(SoundBufferProxy *b);
-void UnregisterBuffer(SoundBufferProxy *b);
 }
 
 // A private interface id, so the proxy can recognise its own wrappers. Needed because the game can
@@ -91,16 +61,7 @@ class SoundBufferProxy : public IDirectSoundBuffer {
 public:
 	SoundBufferProxy(IDirectSoundBuffer *real, bool isMusic)
 		: m_real(real), m_refs(1), m_isMusic(isMusic), m_gameVolume(DSBVOLUME_MAX),
-		  m_offset(VolumeOffsetFor(isMusic)), m_prev(nullptr), m_next(nullptr) {}
-
-	// Recompute from the current settings and push the result at the buffer. Called on every open
-	// buffer when the hotkey moves the master level.
-	void RefreshVolume()
-	{
-		m_offset = VolumeOffsetFor(m_isMusic);
-		m_real->SetVolume(Combine(m_gameVolume));
-	}
-
+		  m_offset(VolumeOffsetFor(isMusic)) {}
 
 	// Apply the player's setting to a freshly created buffer. The game has not called SetVolume
 	// yet, so its notional volume is full scale and the applied value is just our offset.
@@ -110,15 +71,10 @@ public:
 			m_real->SetVolume(Combine(m_gameVolume));
 	}
 
+	// --- IUnknown ---
 	IDirectSoundBuffer *Real() const { return m_real; }
 	bool IsMusic() const { return m_isMusic; }
 
-	// Linkage for the live-buffer registry below. Public because the registry is a pair of free
-	// functions in this file rather than a class -- there is one list and it has one owner.
-	SoundBufferProxy *m_prev;
-	SoundBufferProxy *m_next;
-
-	// --- IUnknown ---
 	STDMETHOD(QueryInterface)(REFIID riid, LPVOID *ppv) override
 	{
 		if (ppv && memcmp(&riid, &kIID_PsobbBufferProxy, sizeof(GUID)) == 0) {
@@ -141,7 +97,6 @@ public:
 	{
 		LONG n = InterlockedDecrement(&m_refs);
 		if (n == 0) {
-			UnregisterBuffer(this);
 			m_real->Release();
 			delete this;
 			return 0;
@@ -209,33 +164,6 @@ private:
 	LONG m_offset;       // the player's setting, same units, <= 0
 };
 
-static SoundBufferProxy *g_head = nullptr;
-
-void RegisterBuffer(SoundBufferProxy *b)
-{
-	EnsureListLock();
-	EnterCriticalSection(&g_listLock);
-	b->m_prev = nullptr;
-	b->m_next = g_head;
-	if (g_head)
-		g_head->m_prev = b;
-	g_head = b;
-	LeaveCriticalSection(&g_listLock);
-}
-
-void UnregisterBuffer(SoundBufferProxy *b)
-{
-	EnterCriticalSection(&g_listLock);
-	if (b->m_prev)
-		b->m_prev->m_next = b->m_next;
-	else if (g_head == b)
-		g_head = b->m_next;
-	if (b->m_next)
-		b->m_next->m_prev = b->m_prev;
-	b->m_prev = b->m_next = nullptr;
-	LeaveCriticalSection(&g_listLock);
-}
-
 }  // namespace
 
 bool UnwrapSoundBuffer(IDirectSoundBuffer *maybeWrapper, IDirectSoundBuffer **real, bool *isMusic)
@@ -266,19 +194,6 @@ IDirectSoundBuffer *WrapSoundBuffer(IDirectSoundBuffer *real, bool isMusic)
 		ProxyLog(true, "could not allocate a buffer wrapper; this buffer plays unscaled");
 		return real;
 	}
-	RegisterBuffer(p);
 	p->ApplyInitialVolume();
 	return p;
-}
-
-void ReapplyAllVolumes(void)
-{
-	EnsureListLock();
-	EnterCriticalSection(&g_listLock);
-	// SetVolume is called with the lock held. That is deliberate: releasing it to build a snapshot
-	// would let a buffer be freed underneath us, and DirectSound's SetVolume is a cheap call on a
-	// handful of live buffers, not something worth risking a use-after-free to avoid.
-	for (SoundBufferProxy *b = g_head; b; b = b->m_next)
-		b->RefreshVolume();
-	LeaveCriticalSection(&g_listLock);
 }

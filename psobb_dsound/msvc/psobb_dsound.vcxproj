@@ -76,7 +76,6 @@
     <ClCompile Include="..\ds_buffer.cpp" />
     <ClCompile Include="..\ds_wrapper.cpp" />
     <ClCompile Include="..\stubs.cpp" />
-    <ClCompile Include="..\volume_hotkey.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\proxy.h" />

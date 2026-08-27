@@ -163,7 +163,7 @@ extern "C" void EnsureRealDsound(void)
 	if (!g_real[IDX_DirectSoundCreate])
 		FatalProxyError("the system dsound.dll has no DirectSoundCreate");
 
-	VolumeConfig vc = GetVolumeConfig();
+	const VolumeConfig &vc = GetVolumeConfig();
 	ProxyLog(false, "psobb_dsound proxy active; forwarding to %s (%d of %d exports resolved)%s; "
 		"volume master=%d%% music=%d%% effects=%d%%",
 		path, IDX_COUNT - missing, IDX_COUNT,
@@ -181,7 +181,7 @@ extern "C" void EnsureRealDsound(void)
 // player to lose. Values are percentages; anything missing or unparseable falls back to 100, which
 // means "sound exactly as it was before this feature existed".
 
-static int ReadCfgInt(const char *text, const char *key, int dflt, int lo, int hi)
+static int ReadCfgPercent(const char *text, const char *key, int dflt)
 {
 	size_t keyLen = strlen(key);
 	for (const char *p = text; *p; ) {
@@ -193,10 +193,10 @@ static int ReadCfgInt(const char *text, const char *key, int dflt, int lo, int h
 				q++;
 			if (*q == '=') {
 				int v = atoi(q + 1);
-				if (v < lo)
-					v = lo;
-				if (v > hi)
-					v = hi;
+				if (v < 0)
+					v = 0;
+				if (v > 100)
+					v = 100;
 				return v;
 			}
 		}
@@ -208,140 +208,37 @@ static int ReadCfgInt(const char *text, const char *key, int dflt, int lo, int h
 	return dflt;
 }
 
-static LONG g_master = 100;   // live: the hotkey moves this
-static LONG g_music = 100;
-static LONG g_effects = 100;
-static LONG g_cfgLoaded = 0;
-
-// The hotkey's own configuration, read from the same file. VolumeHotkey=0 turns the whole thing off
-// for anyone who would rather the keys did nothing.
-LONG g_hotkeyEnabled = 1;
-// Arrow keys, not the numpad: the Steam Deck has no numpad at all and plenty of laptops do not
-// either, and the swallow means the arrow never reaches the game to move the character.
-LONG g_hotkeyDown = VK_DOWN;
-LONG g_hotkeyUp = VK_UP;
-LONG g_hotkeyMod = 2;              // 0 = none, 1 = Ctrl, 2 = Alt, 3 = Shift
-LONG g_hotkeyStep = 5;
-
-static void LoadConfigOnce(void)
+const VolumeConfig &GetVolumeConfig(void)
 {
-	if (InterlockedCompareExchange(&g_cfgLoaded, 1, 0) != 0)
-		return;
+	static VolumeConfig cfg = { 100, 100, 100 };
+	static bool loaded = false;
+	if (loaded)
+		return cfg;
+	loaded = true;
 
 	char path[MAX_PATH + 1];
 	if (!GetModuleFileNameA(nullptr, path, MAX_PATH))
-		return;
+		return cfg;
 	path[MAX_PATH] = 0;
 	char *slash = strrchr(path, '\\');
 	if (!slash)
-		return;
+		return cfg;
 	strcpy(slash + 1, "widescreen.cfg");
 
 	FILE *f = fopen(path, "rb");
 	if (!f) {
 		ProxyLog(false, "no widescreen.cfg; volume stays at 100%% on all three");
-		return;
+		return cfg;
 	}
 	char buf[8192];
 	size_t n = fread(buf, 1, sizeof(buf) - 1, f);
 	fclose(f);
 	buf[n] = 0;
 
-	g_master  = ReadCfgInt(buf, "MasterVolume", 100, 0, 100);
-	g_music   = ReadCfgInt(buf, "MusicVolume", 100, 0, 100);
-	g_effects = ReadCfgInt(buf, "EffectVolume", 100, 0, 100);
-
-	g_hotkeyEnabled = ReadCfgInt(buf, "VolumeHotkey", 1, 0, 1);
-	g_hotkeyDown = ReadCfgInt(buf, "VolumeKeyDown", VK_DOWN, 0, 255);
-	g_hotkeyUp = ReadCfgInt(buf, "VolumeKeyUp", VK_UP, 0, 255);
-	g_hotkeyMod = ReadCfgInt(buf, "VolumeKeyModifier", 2, 0, 3);
-	g_hotkeyStep = ReadCfgInt(buf, "VolumeStep", 5, 1, 50);
-}
-
-VolumeConfig GetVolumeConfig(void)
-{
-	LoadConfigOnce();
-	VolumeConfig c;
-	c.master  = (int)InterlockedCompareExchange(&g_master, 0, 0);
-	c.music   = (int)g_music;
-	c.effects = (int)g_effects;
-	return c;
-}
-
-// Rewrites one key in widescreen.cfg in place, preserving every other line. Called from the hotkey
-// thread so the level the player settles on survives a restart. The options window is the only
-// other writer and cannot be open at the same time as the game in any normal flow.
-static void PersistMasterVolume(int percent)
-{
-	char path[MAX_PATH + 1];
-	if (!GetModuleFileNameA(nullptr, path, MAX_PATH))
-		return;
-	path[MAX_PATH] = 0;
-	char *slash = strrchr(path, '\\');
-	if (!slash)
-		return;
-	strcpy(slash + 1, "widescreen.cfg");
-
-	char buf[8192];
-	size_t n = 0;
-	FILE *f = fopen(path, "rb");
-	if (f) {
-		n = fread(buf, 1, sizeof(buf) - 1, f);
-		fclose(f);
-	}
-	buf[n] = 0;
-
-	char out[8192 + 64];
-	size_t used = 0;
-	bool replaced = false;
-	const char *p = buf;
-	while (*p) {
-		const char *eol = p;
-		while (*eol && *eol != '\n')
-			eol++;
-		size_t len = (size_t)(eol - p) + (*eol ? 1 : 0);
-
-		const char *k = p;
-		while (*k == ' ' || *k == '	')
-			k++;
-		if (_strnicmp(k, "MasterVolume", 12) == 0) {
-			int w = _snprintf_s(out + used, sizeof(out) - used, _TRUNCATE,
-				"MasterVolume=%d\n", percent);
-			if (w > 0)
-				used += w;
-			replaced = true;
-		} else if (used + len < sizeof(out)) {
-			memcpy(out + used, p, len);
-			used += len;
-		}
-		p = eol + (*eol ? 1 : 0);
-	}
-	if (!replaced) {
-		int w = _snprintf_s(out + used, sizeof(out) - used, _TRUNCATE,
-			"MasterVolume=%d\n", percent);
-		if (w > 0)
-			used += w;
-	}
-
-	f = fopen(path, "wb");
-	if (!f)
-		return;
-	fwrite(out, 1, used, f);
-	fclose(f);
-}
-
-void SetMasterVolume(int percent)
-{
-	if (percent < 0)
-		percent = 0;
-	if (percent > 100)
-		percent = 100;
-	if (InterlockedExchange(&g_master, percent) == percent)
-		return;
-
-	ReapplyAllVolumes();
-	PersistMasterVolume(percent);
-	ProxyLog(false, "master volume -> %d%%", percent);
+	cfg.master  = ReadCfgPercent(buf, "MasterVolume", 100);
+	cfg.music   = ReadCfgPercent(buf, "MusicVolume", 100);
+	cfg.effects = ReadCfgPercent(buf, "EffectVolume", 100);
+	return cfg;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -357,12 +254,8 @@ extern "C" HRESULT WINAPI DirectSoundCreate(LPCGUID pcGuidDevice, LPDIRECTSOUND 
 	HRESULT hr = ((PFN_DirectSoundCreate)g_real[IDX_DirectSoundCreate])(
 		pcGuidDevice, ppDS, pUnkOuter);
 
-	if (SUCCEEDED(hr) && ppDS && *ppDS) {
+	if (SUCCEEDED(hr) && ppDS && *ppDS)
 		*ppDS = WrapDirectSound(*ppDS);
-		// Started here rather than in DllMain: there is no point watching for a volume key before
-		// there is any audio to change, and DllMain is the wrong place to create threads.
-		StartVolumeHotkeyThread();
-	}
 	else
 		ProxyLog(false, "DirectSoundCreate returned hr=0x%08lX; nothing to wrap", hr);
 

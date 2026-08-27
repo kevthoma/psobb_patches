@@ -286,6 +286,34 @@ Still live from the plan: **DirectSound volume is hundredths of a dB, not linear
 needs `2000 * log10(fraction)` or 50% sounds nearly silent — and the game's own `SetVolume` calls must
 be **combined** with our scalar, not overwritten, or in-game fades break.
 
+### ⛔ The volume hotkey dead end — built, never worked, SHELVED 2026-08-27
+
+An in-game hotkey to change master volume was built and abandoned after three failed in-game tests.
+The launcher sliders shipped instead and are considered sufficient. **Code preserved on the
+`spike/volume-hotkey` branch** — start there, not from scratch.
+
+**What is known, and it is worth knowing before trying again:**
+
+- **Never bind a function key.** F1–F12 are already bound: Blue Burst has a per-player *"Function key
+  setting"* choosing whether they drive **menu shortcuts** or **chat shortcuts** (newserv documents
+  the bit at `src/SaveFileFormats.hh:586`). They are in use either way. This was the first attempt's
+  default and it was wrong.
+- **Polling cannot work in principle.** `GetAsyncKeyState` observes but does not consume, so the game
+  receives the key too and does both things at once. Any polled binding collides with whatever the
+  client already does with that key.
+- **A `WH_KEYBOARD_LL` hook installs fine and appears to receive nothing.** `SetWindowsHookExW`
+  succeeds (logged), the thread pumps messages, the bindings are correct in the log — and no press
+  ever produced a volume change, with a Windows menu beep indicating the key reached `DefWindowProc`
+  instead of being swallowed.
+- ⚠ **The instrumentation had a blind spot, and this is the single most useful thing to fix first.**
+  The diagnostic only logged keys that were *not* bound, so pressing the **bound** key produced no
+  line whether or not the callback ran. That leaves two very different hypotheses untested and
+  indistinguishable: the callback never fires at all, versus it fires and then fails its own
+  `GameHasFocus()` / `ModifierHeld()` checks. **Instrument the bound-key path before changing
+  anything else.**
+- Untested throughout: the **controller chord** (`BACK` + D-pad) shares none of the keyboard
+  machinery, so trying it alone would isolate hook problems from everything else in one step.
+
 The ask: **a volume control for players.** There is none anywhere today — not in game, not in the setup
 tool. What the client actually has:
 

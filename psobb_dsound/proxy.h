@@ -51,32 +51,19 @@ void ProxyLog(bool isFailure, const char *fmt, ...);
 // the per-buffer path does not stat the disk.
 bool CensusEnabled(void);
 
-// The player's settings, as percentages 0-100, read from widescreen.cfg -- the file the launcher
-// and the widescreen wrapper already share, so players do not gain a second config to lose.
+// The player's settings, as percentages 0-100. Read once from widescreen.cfg (the same file the
+// widescreen wrapper and the launcher already share) the first time audio is touched.
 //
-// Master is now live: the in-game hotkey moves it while the game runs, so it is stored as a LONG
-// and touched through Interlocked* rather than being a plain int read once. Music and effects stay
-// launcher-only, which is deliberate -- mixing categories mid-combat is not a thing anyone wants,
-// and it keeps one number to reason about on the audio path.
+// There are no live updates, and that is now a settled decision rather than a deferral: the sliders
+// live in the launcher, so the values cannot change while the game runs. An in-game hotkey was
+// built and shelved -- see "the volume hotkey dead end" in notes/psobb-client-map.md before
+// attempting it again, and the code on the spike/volume-hotkey branch.
 struct VolumeConfig {
 	int master;
 	int music;
 	int effects;
 };
-VolumeConfig GetVolumeConfig(void);
-
-// Sets the master percentage (clamped 0-100), re-applies it to every open buffer, and schedules the
-// value to be written back to widescreen.cfg. Safe to call from the hotkey thread.
-void SetMasterVolume(int percent);
-
-// Re-applies the current settings to every buffer that is open right now. Cheap enough to call on
-// each hotkey press: only live buffers are walked, and SetVolume on an already-playing buffer is
-// a normal thing to do.
-void ReapplyAllVolumes(void);
-
-// Starts the thread that watches for the volume hotkey and the controller chord. Called once, after
-// the device exists. No-op if the player has turned the hotkey off.
-void StartVolumeHotkeyThread(void);
+const VolumeConfig &GetVolumeConfig(void);
 
 #ifndef PROXY_NO_DSOUND
 // Wraps a real IDirectSound so CreateSoundBuffer can be observed and scaled.
