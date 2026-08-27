@@ -490,7 +490,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 588);
+            ClientSize = new Size(430, 604);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -544,23 +544,23 @@ namespace Corellia
             // engine uses are distinguishable from one-shot effects, measured over 6,363 buffers.
             // Values are percentages; the proxy converts to decibels, which is what DirectSound
             // actually wants.
-            var gSound = new GroupBox { Text = "Sound", Location = new Point(16, 354), Size = new Size(398, 112) };
-            tbMaster = AddVolumeSlider(gSound, "Master:", 22);
-            tbMusic = AddVolumeSlider(gSound, "Music:", 50);
-            tbEffects = AddVolumeSlider(gSound, "Effects:", 78);
+            var gSound = new GroupBox { Text = "Sound", Location = new Point(16, 354), Size = new Size(398, 128) };
+            tbMaster = AddVolumeSlider(gSound, "Master:", 24);
+            tbMusic = AddVolumeSlider(gSound, "Music:", 56);
+            tbEffects = AddVolumeSlider(gSound, "Effects:", 88);
             Controls.Add(gSound);
 
             // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
             // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
-            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 474), AutoSize = true };
+            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 490), AutoSize = true };
             Controls.Add(cbController);
 
             // Remember login — toggles the game's own ACCOUNT_CHECK / PASSWORD_CHECK registry flags
             // (like the native option). We never read or write the credentials themselves.
-            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 498), AutoSize = true };
+            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 514), AutoSize = true };
             Controls.Add(cbSaveLogin);
 
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 528), Size = new Size(130, 44) };
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 544), Size = new Size(130, 44) };
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -572,18 +572,23 @@ namespace Corellia
         // tick marks legible.
         static TrackBar AddVolumeSlider(GroupBox parent, string caption, int y)
         {
-            var label = new Label { Text = caption, Location = new Point(14, y + 4), AutoSize = true };
+            var label = new Label { Text = caption, Location = new Point(14, y + 7), AutoSize = true };
             var bar = new TrackBar {
+                // AutoSize defaults to TRUE on TrackBar, which makes it IGNORE Size and claim about
+                // 45px of height for its tick gutter. Three of those at 28px spacing overlapped each
+                // other, leaked stray tick marks into the neighbouring rows, and pushed the last
+                // slider through the bottom of the group box. Turn it off and take the height back.
+                AutoSize = false,
+                TickStyle = TickStyle.None,
                 Location = new Point(78, y),
-                Size = new Size(250, 24),
+                Size = new Size(250, 30),
                 Minimum = 0,
                 Maximum = 100,
-                TickFrequency = 25,
                 SmallChange = 5,
                 LargeChange = 20,
                 Value = 100,
             };
-            var pct = new Label { Text = "100%", Location = new Point(338, y + 4), AutoSize = true };
+            var pct = new Label { Text = "100%", Location = new Point(338, y + 7), AutoSize = true };
             bar.ValueChanged += (s, e) => {
                 bar.Value = (bar.Value / 5) * 5;
                 pct.Text = bar.Value + "%";
