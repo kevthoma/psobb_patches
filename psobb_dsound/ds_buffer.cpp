@@ -68,9 +68,13 @@ static void EnsureListLock(void)
 		InitializeCriticalSection(&g_listLock);
 }
 
-namespace { class SoundBufferProxy; }
-static void RegisterBuffer(SoundBufferProxy *b);
-static void UnregisterBuffer(SoundBufferProxy *b);
+// Forward declarations, inside the same anonymous namespace the definitions end up in: declaring
+// them at global scope instead makes them different functions and the call ambiguous.
+namespace {
+class SoundBufferProxy;
+void RegisterBuffer(SoundBufferProxy *b);
+void UnregisterBuffer(SoundBufferProxy *b);
+}
 
 // A private interface id, so the proxy can recognise its own wrappers. Needed because the game can
 // hand a buffer back to us -- DuplicateSoundBuffer takes one as an argument -- and passing our
@@ -97,8 +101,6 @@ public:
 		m_real->SetVolume(Combine(m_gameVolume));
 	}
 
-	SoundBufferProxy *m_prev;
-	SoundBufferProxy *m_next;
 
 	// Apply the player's setting to a freshly created buffer. The game has not called SetVolume
 	// yet, so its notional volume is full scale and the applied value is just our offset.
@@ -209,7 +211,7 @@ private:
 
 static SoundBufferProxy *g_head = nullptr;
 
-static void RegisterBuffer(SoundBufferProxy *b)
+void RegisterBuffer(SoundBufferProxy *b)
 {
 	EnsureListLock();
 	EnterCriticalSection(&g_listLock);
@@ -221,7 +223,7 @@ static void RegisterBuffer(SoundBufferProxy *b)
 	LeaveCriticalSection(&g_listLock);
 }
 
-static void UnregisterBuffer(SoundBufferProxy *b)
+void UnregisterBuffer(SoundBufferProxy *b)
 {
 	EnterCriticalSection(&g_listLock);
 	if (b->m_prev)
