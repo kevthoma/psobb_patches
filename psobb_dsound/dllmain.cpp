@@ -216,8 +216,10 @@ static LONG g_cfgLoaded = 0;
 // The hotkey's own configuration, read from the same file. VolumeHotkey=0 turns the whole thing off
 // for anyone who would rather the keys did nothing.
 LONG g_hotkeyEnabled = 1;
-LONG g_hotkeyDown = VK_SUBTRACT;   // numpad minus
-LONG g_hotkeyUp = VK_ADD;          // numpad plus
+// Arrow keys, not the numpad: the Steam Deck has no numpad at all and plenty of laptops do not
+// either, and the swallow means the arrow never reaches the game to move the character.
+LONG g_hotkeyDown = VK_DOWN;
+LONG g_hotkeyUp = VK_UP;
 LONG g_hotkeyMod = 2;              // 0 = none, 1 = Ctrl, 2 = Alt, 3 = Shift
 LONG g_hotkeyStep = 5;
 
@@ -250,8 +252,8 @@ static void LoadConfigOnce(void)
 	g_effects = ReadCfgInt(buf, "EffectVolume", 100, 0, 100);
 
 	g_hotkeyEnabled = ReadCfgInt(buf, "VolumeHotkey", 1, 0, 1);
-	g_hotkeyDown = ReadCfgInt(buf, "VolumeKeyDown", VK_SUBTRACT, 0, 255);
-	g_hotkeyUp = ReadCfgInt(buf, "VolumeKeyUp", VK_ADD, 0, 255);
+	g_hotkeyDown = ReadCfgInt(buf, "VolumeKeyDown", VK_DOWN, 0, 255);
+	g_hotkeyUp = ReadCfgInt(buf, "VolumeKeyUp", VK_UP, 0, 255);
 	g_hotkeyMod = ReadCfgInt(buf, "VolumeKeyModifier", 2, 0, 3);
 	g_hotkeyStep = ReadCfgInt(buf, "VolumeStep", 5, 1, 50);
 }

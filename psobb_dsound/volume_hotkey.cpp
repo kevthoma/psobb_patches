@@ -44,6 +44,10 @@ static PFN_XInputGetState g_xinput;
 // Steps requested by the hook and not yet applied. Signed: negative is quieter.
 static LONG g_pendingSteps;
 
+// Last key seen with the modifier held that was NOT one of ours, for the timer thread to report.
+// Deliberately a value handed off rather than a log call: the hook callback must not do file I/O.
+static LONG g_unboundKey = -1;
+
 // The controller chord: BACK held, then D-pad up or down. BACK is a modifier here rather than an
 // action, so a pad player cannot nudge the volume by accident while moving, and the D-pad keeps the
 // stick free. Loaded dynamically because the XInput DLL version varies across Windows releases and
@@ -89,6 +93,15 @@ static LRESULT CALLBACK KeyboardHook(int code, WPARAM wParam, LPARAM lParam)
 		const KBDLLHOOKSTRUCT *k = (const KBDLLHOOKSTRUCT *)lParam;
 		bool isOurs = (k->vkCode == (DWORD)g_hotkeyDown || k->vkCode == (DWORD)g_hotkeyUp);
 
+		// Diagnostic hand-off. A press that yields neither a volume change nor an "unbound key"
+		// line means the hook is not receiving at all; a line naming a different vkCode means the
+		// binding simply is not the key being pressed. That distinction is otherwise invisible and
+		// cost a test round to guess at. Only the value is stored here -- writing the log from
+		// inside the callback is what gets a low-level hook dropped for missing
+		// LowLevelHooksTimeout, which would corrupt the very measurement being taken.
+		if (!isOurs && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) && ModifierHeld())
+			InterlockedExchange(&g_unboundKey, (LONG)k->vkCode);
+
 		if (isOurs && GameHasFocus() && ModifierHeld()) {
 			// Alt-modified keys arrive as WM_SYSKEY*, so both forms have to be matched.
 			bool isDown = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
@@ -119,6 +132,8 @@ static DWORD WINAPI VolumeInputThread(LPVOID)
 	if (!hook)
 		ProxyLog(true, "could not install the keyboard hook (GetLastError=%lu); the volume key is "
 			"unavailable, the controller chord still works", GetLastError());
+	else
+		ProxyLog(false, "keyboard hook installed");
 
 	UINT_PTR timer = SetTimer(nullptr, 0, 50, nullptr);
 	bool prevPadDown = false, prevPadUp = false;
@@ -132,6 +147,12 @@ static DWORD WINAPI VolumeInputThread(LPVOID)
 		}
 
 		int steps = (int)InterlockedExchange(&g_pendingSteps, 0);
+
+		LONG unbound = InterlockedExchange(&g_unboundKey, -1);
+		if (unbound >= 0 && CensusEnabled())
+			ProxyLog(false, "hotkey: modifier held with vkCode 0x%02X, which is not bound "
+				"(bound: 0x%02X down / 0x%02X up)",
+				(unsigned)unbound, (int)g_hotkeyDown, (int)g_hotkeyUp);
 
 		if (g_xinput && GameHasFocus()) {
 			bool padDown = false, padUp = false;
