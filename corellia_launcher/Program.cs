@@ -60,6 +60,65 @@ namespace Corellia
             catch { /* non-fatal: fall back to whatever's already in data/ */ }
         }
 
+        // Put the newer audio proxy in place, if the patch server has delivered one.
+        //
+        // WHY THIS EXISTS AT ALL. The proxy is the one file the patch server cannot update.
+        // Overwriting an existing dsound.dll fails -- the client re-downloads it every login and
+        // never starts. That is not a guess: it was reproduced deliberately twice, on 2026-08-27
+        // with a test build and again on 2026-08-30 with the real one. CREATING a file the client
+        // does not have works fine, and so does overwriting any .exe (Corellia.exe included --
+        // also verified on the canary, which is what makes this code reachable at all).
+        //
+        // So the server ships the new proxy under a name nothing loads, dsound_v2.dll, and the
+        // LAUNCHER installs it here: the game is not running yet and nothing has dsound.dll open.
+        //
+        // Two decisions worth keeping:
+        //
+        //   * REPAIR ONLY, NEVER INTRODUCE. If dsound.dll is absent we return without doing
+        //     anything, because absent means the installer deliberately left it out. That is the
+        //     Steam Deck: the proxy crashed the game under Proton (two crashes, 2026-08-27), so
+        //     compose-client.sh excludes it. Copying it in here would reintroduce exactly that.
+        //
+        //   * dsound_v2.dll IS NOT DELETED afterwards. It sits in the patch index, so deleting it
+        //     only makes the server re-send 132 KB on every login, forever. Left alone, the byte
+        //     compare below turns this into a no-op from the second launch onward.
+        public static void InstallProxyUpdate(string dir)
+        {
+            try
+            {
+                string src = Path.Combine(dir, "dsound_v2.dll");
+                string dst = Path.Combine(dir, "dsound.dll");
+
+                if (!File.Exists(src)) return;              // nothing delivered
+                if (!File.Exists(dst)) return;              // repair only -- see above
+                if (FilesAreIdentical(src, dst)) return;    // already applied
+
+                File.Copy(src, dst, true);
+            }
+            catch
+            {
+                // Non-fatal on purpose. If the copy fails (someone already has the game running,
+                // so the DLL is mapped), the player keeps the older proxy and we try again next
+                // launch. Audio settings are never worth blocking a launch over.
+            }
+        }
+
+        // Byte compare, not size-or-timestamp. The patch server writes its own mtimes, and two
+        // builds of the proxy can share a size while differing in content.
+        static bool FilesAreIdentical(string a, string b)
+        {
+            try
+            {
+                if (new FileInfo(a).Length != new FileInfo(b).Length) return false;
+                byte[] ba = File.ReadAllBytes(a);
+                byte[] bb = File.ReadAllBytes(b);
+                for (int i = 0; i < ba.Length; i++)
+                    if (ba[i] != bb[i]) return false;
+                return true;
+            }
+            catch { return false; }
+        }
+
         // Read a bool key from widescreen.cfg (used by the launcher, which has no UI).
         public static bool ReadCfgBool(string dir, string key, bool dflt)
         {
@@ -279,6 +338,12 @@ namespace Corellia
             // Give this build its own registry key a chance to inherit the player's login from
             // the old shared one. One-shot and self-marking; safe to call on every launch.
             Helpers.MigrateLegacyRegistry(dir);
+
+            // Install a newer audio proxy if the patch server delivered one. Deliberately in the
+            // LAUNCHER path only, never in the options window: the options window is opened BY the
+            // PSO launcher and can be up while the game is running, which is exactly when
+            // dsound.dll is mapped and cannot be replaced.
+            Helpers.InstallProxyUpdate(dir);
 
             // Apply the controller-prompt texture (from the saved setting) before the game starts.
             Helpers.ApplyControllerPrompts(dir, Helpers.ReadCfgBool(dir, "ControllerPrompts", true));
