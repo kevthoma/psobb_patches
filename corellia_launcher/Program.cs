@@ -331,6 +331,11 @@ namespace Corellia
         readonly string cfgPath;
 
         ComboBox cboMode, cboRes, cboSceneSharpen, cboFont;
+
+        // Which modes the dropdown currently OFFERS, as indices into DisplayModes/DisplayModeKeys.
+        // The dropdown position is no longer the mode index, because Fullscreen is not offered --
+        // see BuildModeList. Never index DisplayModeKeys with cboMode.SelectedIndex directly.
+        readonly List<int> offeredModes = new List<int>();
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin;
         TrackBar tbMaster, tbMusic, tbEffects;
 
@@ -344,6 +349,12 @@ namespace Corellia
 
         // Display modes, in the order players see them: the recommended one first, the niche one
         // last. The index maps to the DisplayMode= value the wrapper parses (DISPLAY_* in Options.c).
+        // Fullscreen is deliberately NOT offered any more. It is the only display mode that mutates
+        // global display state (it switches the desktop resolution before the device is created), and
+        // on a hard crash the desktop can be left at the changed mode. Its one advantage over
+        // borderless -- render at a non-native resolution AND fill the screen -- was not being used by
+        // anyone. The WRAPPER still implements it, and any config that already selects it keeps
+        // working and keeps the option visible; this only stops it being newly chosen.
         static readonly string[] DisplayModes = { "Borderless Fullscreen", "Fullscreen", "Windowed" };
         static readonly string[] DisplayModeKeys = { "borderless", "fullscreen", "windowed" };
         const int ModeBorderless = 0, ModeFullscreen = 1, ModeWindowed = 2;
@@ -503,7 +514,7 @@ namespace Corellia
             var gDisplay = new GroupBox { Text = "Display", Location = new Point(16, 50), Size = new Size(398, 128) };
             var lblMode = new Label { Text = "Mode:", Location = new Point(14, 28), AutoSize = true };
             cboMode = new ComboBox { Location = new Point(150, 24), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList };
-            cboMode.Items.AddRange(DisplayModes);
+            // Items are filled in by BuildModeList once the config has been read.
             var lblRes = new Label { Text = "Resolution:", Location = new Point(14, 60), AutoSize = true };
             cboRes = new ComboBox { Location = new Point(150, 56), Size = new Size(200, 24), DropDownStyle = ComboBoxStyle.DropDownList };
             cboRes.Items.AddRange(SupportedResolutions());
@@ -514,7 +525,7 @@ namespace Corellia
             Controls.Add(gDisplay);
             // Borderless always fills the monitor it launches on, so a resolution choice would be a
             // lie there; the other two both honour it.
-            cboMode.SelectedIndexChanged += (s, e) => cboRes.Enabled = cboMode.SelectedIndex != ModeBorderless;
+            cboMode.SelectedIndexChanged += (s, e) => cboRes.Enabled = SelectedMode() != ModeBorderless;
 
             // Effects
             var gFx = new GroupBox { Text = "Effects", Location = new Point(16, 188), Size = new Size(398, 96) };
@@ -605,6 +616,30 @@ namespace Corellia
             if (d.TryGetValue(key, out var s) && int.TryParse(s.Trim(), out var i))
                 v = i < 0 ? 0 : (i > 100 ? 100 : i);
             bar.Value = (v / 5) * 5;
+        }
+
+        // Fill the dropdown, offering Fullscreen only when the config already selects it, so an
+        // existing player keeps their setting and can see what it is. Returns the position to select.
+        int BuildModeList(int mode)
+        {
+            offeredModes.Clear();
+            offeredModes.Add(ModeBorderless);
+            if (mode == ModeFullscreen) offeredModes.Add(ModeFullscreen);
+            offeredModes.Add(ModeWindowed);
+
+            cboMode.Items.Clear();
+            foreach (var m in offeredModes) cboMode.Items.Add(DisplayModes[m]);
+
+            int pos = offeredModes.IndexOf(mode);
+            return pos < 0 ? offeredModes.IndexOf(ModeBorderless) : pos;
+        }
+
+        // The dropdown position is not the mode index once Fullscreen is hidden; always go through here.
+        int SelectedMode()
+        {
+            int i = cboMode.SelectedIndex;
+            if (i < 0 || i >= offeredModes.Count) return ModeBorderless;
+            return offeredModes[i];
         }
 
         void TryLoadIcon()
@@ -699,7 +734,7 @@ namespace Corellia
             {
                 mode = ModeWindowed;
             }
-            cboMode.SelectedIndex = mode;
+            cboMode.SelectedIndex = BuildModeList(mode);
             cboRes.Enabled = mode != ModeBorderless;
 
             // Absent keys mean 100%, i.e. exactly how the game sounded before this feature existed.
@@ -748,7 +783,7 @@ namespace Corellia
             // ASI loader, so disabling it silently drops patches/largeassets.asi, the engine then
             // reads a bundled HD .bml into a vanilla-sized buffer, and the client access-violates on
             // the first over-cap area (reliably Caves 1). The wrapper stays loaded in every mode.
-            int mode = cboMode.SelectedIndex < 0 ? ModeBorderless : cboMode.SelectedIndex;
+            int mode = SelectedMode();
             SetKey(lines, "DisplayMode", DisplayModeKeys[mode]);
             // Written for compatibility both ways: an older d3d8.dll ignores DisplayMode entirely and
             // would otherwise keep whatever Windowed= said last. Fullscreen has no old-wrapper
