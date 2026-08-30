@@ -55,6 +55,13 @@ LONG VolumeOffsetFor(bool isMusic)
 static const GUID kIID_PsobbBufferProxy =
 	{ 0x6C4E1A52, 0x9D3B, 0x4E77, { 0x9E, 0x6B, 0x1F, 0x0A, 0x2C, 0x5D, 0x8B, 0x31 } };
 
+// Defined locally so this DLL needs no dxguid.lib, same as in ds_wrapper.cpp. Values from the
+// DirectX headers: IDirectSound is ...83, IDirectSoundBuffer is ...85.
+static const GUID kIID_IUnknown =
+	{ 0x00000000, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+static const GUID kIID_IDirectSoundBuffer =
+	{ 0x279AFA85, 0x4981, 0x11CE, { 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60 } };
+
 namespace {
 
 class SoundBufferProxy : public IDirectSoundBuffer {
@@ -77,17 +84,41 @@ public:
 
 	STDMETHOD(QueryInterface)(REFIID riid, LPVOID *ppv) override
 	{
-		if (ppv && memcmp(&riid, &kIID_PsobbBufferProxy, sizeof(GUID)) == 0) {
+		if (!ppv)
+			return E_POINTER;
+
+		if (memcmp(&riid, &kIID_PsobbBufferProxy, sizeof(GUID)) == 0) {
 			AddRef();
 			*ppv = this;
 			return S_OK;
 		}
 
-		// Forwarded untouched. The interfaces the client actually asks for here are
+		// Asked for what we ARE: hand back the wrapper. This was previously forwarded to the real
+		// buffer along with everything else, which was wrong twice over:
+		//
+		//   * It breaks COM identity. QueryInterface(IID_IUnknown) must return the SAME pointer for
+		//     the same object, and returning the real buffer's IUnknown returns a different one.
+		//     Anything comparing pointers to decide "is this the buffer I already have" gets a
+		//     wrong answer. The device wrapper next door always did this correctly; the buffer
+		//     wrapper did not, and the inconsistency was the bug.
+		//   * A caller that asked for IID_IDirectSoundBuffer received the raw buffer and from then
+		//     on bypassed the volume scaling entirely.
+		if (memcmp(&riid, &kIID_IDirectSoundBuffer, sizeof(GUID)) == 0 ||
+			memcmp(&riid, &kIID_IUnknown, sizeof(GUID)) == 0) {
+			AddRef();
+			*ppv = static_cast<IDirectSoundBuffer *>(this);
+			return S_OK;
+		}
+
+		// Everything else is forwarded. The interfaces the client actually asks for here are
 		// IDirectSoundNotify (2,412 buffers set CTRLPOSITIONNOTIFY) and IDirectSound3DBuffer
 		// (CTRL3D), and neither carries a volume control -- IDirectSound3DBuffer does distance
 		// attenuation, which is the game's business and composes with our scalar rather than
-		// fighting it. Pretending to implement them would be all risk and no benefit.
+		// fighting it. Implementing them would be all risk and no benefit.
+		//
+		// Note what this means: a caller holding one of those DOES talk to the real buffer
+		// directly. That is fine for what they do, and their reference keeps the real object
+		// alive on its own refcount, independent of ours.
 		return m_real->QueryInterface(riid, ppv);
 	}
 
