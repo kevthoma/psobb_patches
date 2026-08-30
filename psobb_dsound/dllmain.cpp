@@ -131,13 +131,17 @@ static void FatalProxyError(const char *what)
 // "system32" is expected, not a bug.)
 extern "C" void EnsureRealDsound(void)
 {
-	if (g_loadState == 2)
+	// Shared state is read with InterlockedCompareExchange(&v, 0, 0) rather than a plain load. A
+	// bare read of a non-volatile global inside a spin loop is something the compiler may hoist,
+	// which would turn the wait below into an infinite loop. It happens to work on MSVC/x86 today
+	// only because Sleep() is an opaque call that forces a reload -- that is luck, not a guarantee.
+	if (InterlockedCompareExchange(&g_loadState, 0, 0) == 2)
 		return;
 
 	// First caller wins and does the work; any other thread spins until it is done. In practice
 	// the client initialises sound from one thread, but the audio path is not ours to assume.
 	if (InterlockedCompareExchange(&g_loadState, 1, 0) != 0) {
-		while (g_loadState != 2)
+		while (InterlockedCompareExchange(&g_loadState, 0, 0) != 2)
 			Sleep(1);
 		return;
 	}
