@@ -551,6 +551,41 @@ the class term should be visible at its source. That is the next move, and it is
 ⚖ **Provenance:** use that repo to navigate and to form hypotheses only. **No licence is stated, so copy
 nothing from it into this repo** — confirm every claim against our own binary (as above) or in game.
 
+### Accumulator traced one hop — the boosts are PRECOMPUTED into the entity (2026-08-30)
+
+Tracing `[esp+0x2c]` back gave a real structural answer. The enclosing function starts at **`0x007753B4`**
+(`push edi/esi/ebp/ebx; sub esp, 0xB0`), and the slot is written **once**, early, at `0x00775405`:
+
+```
+0x007753F7  movsx esi, word ptr [ebx + 0x116]
+0x007753FE  movsx edx, word ptr [ebx + 0x118]
+0x00775405  mov   dword ptr [esp + 0x2c], edx     <- the X in (X * MST) * 0.01
+```
+
+**So nothing is summed at cast time.** `X` is read straight out of two `int16` fields on the entity,
+`+0x116` and `+0x118`. `ebx` is confirmed to be an **entity**: the same `ebx` is used for
+`movsx edx, word ptr [ebx+0x2BE]` (MST) at `0x0077662C`. The CB/WB/FB/MB sum must therefore be computed
+**elsewhere — at equip / level-up / class-set time — and cached** into those fields. Find the writer and
+you find the class term.
+
+**Writer candidates (word-sized writes to BOTH `+0x116` and `+0x118` on one base) — 9 sites:**
+`0x0052FCCB`, `0x0052FD10`, `0x0052FDA2`, `0x005E7A4D`, `0x005E7AE0`, `0x006E480D`, `0x006EC440`,
+`0x006ECA84`, `0x00770A06` (each paired with its `+0x118` write ~7–16 bytes later).
+
+⚠ **`0x0052FCxx` is ELIMINATED — offset collision, not our struct.** It writes `0xA`/`0xB`/`7` into
+`+0x116` and a global-table value into `+0x118`, driven by a state selector at `+0x3A0` and interleaved
+with sound-id calls (`0x2DE`/`0x2DF`/`0x2E0`). Different object type, same offsets. **This is the third
+false positive in this hunt caused by matching on offsets/constants without type information** — the
+earlier two were class-sized immediates. Treat any offset-only match as unproven until the base register
+is tied to a known field (the `+0x2BE` MST trick above is a good tie-break).
+
+**Next: examine the remaining 8 writers**, tying each base register to a known entity field before
+believing it. Start with `0x005E7A4D`/`0x005E7AE0` (a pair in one function) and `0x00770A06` (which sits
+in the same `0x77xxxx` neighbourhood as the technique code).
+
+⚠ **Also still unverified:** that `(X × MST) × 0.01` is *technique damage* at all, rather than TP cost or
+another magnitude. Worth confirming before building anything on it.
+
 ## Dead ends (do not re-walk)
 
 - **Quest scripts do not cause the One Person exit.** `qexit` (`0xF8C6`) is used by only 5 of ~53 solo
