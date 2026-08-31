@@ -607,6 +607,12 @@ offset-collision false positives and no values. **Measure in game instead** — 
 two Forces, compare damage — which yields defensible numbers *and* would let a future static hunt
 recognise the right constant immediately. The two approaches are complementary now, not alternatives.
 
+➡ **The session plan is written up: [`technique-boost-measurement-protocol.md`](technique-boost-measurement-protocol.md).**
+Its load-bearing point is that **two** measurements are needed — ratios *within* a character (which
+cancels MST, and catches a family-specific boost) and damage-per-MST *across* characters (which catches a
+flat class-wide one). Each is blind to what the other catches, and running only the first is how the
+experiment returns a false negative that looks like a clean result.
+
 ⚠ **Also still unverified:** that `(X × MST) × 0.01` is *technique damage* at all, rather than TP cost or
 another magnitude. Worth confirming before building anything on it.
 
