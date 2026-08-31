@@ -509,6 +509,48 @@ object handled around `0x0049B7D0`, with `[esi+0x43C]` and `[esi+0x484]` acting 
 select between ids 7/10 and 8/11. Unidentified, but it is a genuine class-dependent site if a future
 hunt needs a starting point.
 
+### ⭐ The hunt reopened — an external address map, VALIDATED against our binary (2026-08-30)
+
+`https://gitlab.psobb.io/psobb/original-psobb-client-source` — despite the name it is **not leaked Sega
+source**, it is a community **Ghidra decompilation of the same `psobb.exe` we target**. Its
+`notes/_wiki_combat_formulas.md` gave two things the static hunt never had.
+
+**1. The formula shape — and it says my search was looking for the wrong thing.** Attack-technique damage
+carries four boost terms: `CB/WB/FB/MB` = Class/Weapon/Frame/Mag boost percentages, **added, not
+multiplied**. Every scan above hunted a *multiplier*. A summed percentage is a different search.
+(The doc gives no CB values, class mapping or address — it defers those as open work. Map, not answer.)
+
+**2. An address map that CHECKS OUT on our build.** Do not take it on trust — it was verified:
+
+| Check | Result |
+|---|---|
+| `freeze_entity` @ `0x00778CC0` writes `0x96` (150 frames) | ✅ confirmed — `mov [esi+0x270], 0x96` at `0x00778E18` |
+| …and to entity offset `+0x270`, which the doc independently claims is `freeze_duration` | ✅ same instruction |
+| 10 claimed function addresses land on real prologues | ✅ 9/10 |
+
+⚠ **A naive check nearly rejected a correct map.** I first looked for the literal `0x1e` in
+`get_base_beat_time_in_frames` and for `0x96` in only the first 18 instructions of `freeze_entity`, and
+scored both as failures. The compiler strength-reduces `×30` into a shift/add chain so `0x1e` never
+appears, and the `0x96` write is ~90 instructions in. Design the falsification test around what a
+compiler actually emits.
+
+**Entity struct offsets now known** (doc's, confirmed where checked): `+0x270` freeze_duration,
+`+0x2BE` MST (also MaxTP), **`+0x336` current TP** (found here: `0x00777368` clamps `+0x336` to `+0x2BE`),
+`+0x2D0` EVP, `+0x2F6` EFR, `+0x2FA` EIC, `+0x2FE` ELT, `+0xBF` Megid resist, `+0x8A4` attack-type enum.
+
+**Useful named functions:** `entity_hit_by_tech` `0x00773AFC` (takes damage as a float *argument* — no MST
+read anywhere inside it, so the magnitude is computed caster-side, not here), `EntityHitEntity`
+`0x00773350`, `ProcessWeaponHitboxDamage` `0x005E641C`.
+
+**⭐ WHERE TO RESUME.** At `0x0077661C`–`0x00776655` the client computes, in effect,
+`(X × MST) × 0.01` — `movsx edx, [ebx+0x2BE]` (MST), `imul esi, edx`, `fild`, `fmul [0x978214]` where
+`[0x978214] = 0.01`. **The `× 0.01` is the tell for an added-percentage term**, and `X` arrives from
+`[esp+0x2c]`. **Trace where `[esp+0x2c]` is filled** — that is the accumulator CB/WB/FB/MB sum into, and
+the class term should be visible at its source. That is the next move, and it is a well-posed one.
+
+⚖ **Provenance:** use that repo to navigate and to form hypotheses only. **No licence is stated, so copy
+nothing from it into this repo** — confirm every claim against our own binary (as above) or in game.
+
 ## Dead ends (do not re-walk)
 
 - **Quest scripts do not cause the One Person exit.** `qexit` (`0xF8C6`) is used by only 5 of ~53 solo
