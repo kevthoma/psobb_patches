@@ -456,6 +456,58 @@ selections is upstream of it. Better than searching for the UI directly.
 | Inventory past 30 | `PlayerInventory` at offset 0 | Protocol side understood; the client-side wall is the 30-slot inventory UI, which has no paging. |
 | In-game volume control | `dsound.dll` proxy (single import: ordinal #1 `DirectSoundCreate`) | No game RE needed — wrap `CreateSoundBuffer` and scale per buffer. Verify the streaming-vs-static split before promising separate BGM/SE. See the sound survey above. |
 | Post-quest exit in One Person | — | **No anchor yet.** Confirmed the client sends `0x98` Leave game ~2s after the quest's success handler `ret`s; the trigger is in the client and unlocated. Quest scripts and server are ruled out. |
+| Per-class technique power boosts | — | **No anchor yet**, and static scanning is exhausted — see below. Needs a live debugger breakpoint on damage application. |
+
+## Per-class technique boosts — searched statically, NOT found (2026-08-30)
+
+The question: Force classes are reported to boost particular technique families (FOnewm and the
+Ra-line). Where does that rule live?
+
+**Settled first, so it is not re-argued:** technique *level caps* are server-side, in the ItemPMT
+(`MaxTechLevels`, 19 techs × 12 classes, stored as level−1). **All four Forces are identical on all 19
+techniques**, so caps are NOT the mechanic. Power is separate data, and it was not found.
+
+**Eliminated — do not re-run these:**
+
+| Hypothesis | Result |
+|---|---|
+| In a server table | No. Every ItemPMT key checked; `TechBoosts` (44 entries) is *item* data reached by `tech_boost_entry_index`. Entry 14 is `Rafoie/Rabarta/Razonde +20%` — looks like class data, is not. |
+| In a client data file | No. The client ships no ItemPMT (BB receives it from the server), and none of the 46 `.prs`/`.rel` files is a class/tech table. |
+| 12×19 or 19×12 byte matrix in `psobb.exe` | No. Both orientations, *without* assuming class order, requiring exactly four all-zero rows (the androids). Only sparse-bitmap noise. |
+| 12-byte per-class index into `TechBoosts` | No. 6 candidates, all incoherent; none puts FOnewm on the Ra entry. |
+| 12 consecutive float32, one per class | No. Only denormals and zeros. |
+| Boost-shaped float constant referenced near a class compare | 208 sites, none convincing. |
+| Region dispatching on ≥3 distinct Force ids | 56 regions. Best was `0x0049B812` (compares 6, 7, 8, 0xA within 32 bytes) — but it groups **(6,9)** against **(7,8,10,11)**, which is gender/model-shaped, not Force-shaped. A false positive from class-sized constants. |
+
+**Conclusion: almost certainly hardcoded in client *code*, not stored as data.** Direct precedent —
+newserv's `Items.cc` on mag evolution: *"Sega really did just hardcode all these rules into the client.
+There is no data file describing these evolutions."*
+
+**What would actually crack it:** a debugger breakpoint on technique damage application — cast the same
+technique at the same level from two different Forces and walk back to the divergence. Static scanning
+cannot substitute here, because there is no anchor into the technique damage path: the only technique
+strings in the binary are sound-effect names (`SE_TECH_*`), reached by sound *id*, not by string address.
+
+**Tooling built, reusable:** full linear disassembly of `.text` with resync — 1,570,200 instructions.
+⚠ **capstone's `disasm()` stops dead at the first undecodable byte.** A plain call covered only ~8% of
+`.text` (128k instructions) and silently looked like it had worked — the failure mode is a *quiet
+partial answer*, not an error. Always resync:
+
+```python
+def disasm_all(buf, base):
+    pos = 0
+    while pos < len(buf):
+        last = pos
+        for ins in md.disasm(buf[pos:], base + pos):
+            yield ins
+            last = ins.address - base + ins.size
+        pos = last + 1 if last <= pos else last
+```
+
+**Incidental find, real and possibly useful:** something class-shaped is read from `[esi+0x37C]` on the
+object handled around `0x0049B7D0`, with `[esi+0x43C]` and `[esi+0x484]` acting as two booleans that
+select between ids 7/10 and 8/11. Unidentified, but it is a genuine class-dependent site if a future
+hunt needs a starting point.
 
 ## Dead ends (do not re-walk)
 
