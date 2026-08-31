@@ -579,9 +579,33 @@ false positive in this hunt caused by matching on offsets/constants without type
 earlier two were class-sized immediates. Treat any offset-only match as unproven until the base register
 is tied to a known field (the `+0x2BE` MST trick above is a good tie-break).
 
-**Next: examine the remaining 8 writers**, tying each base register to a known entity field before
-believing it. Start with `0x005E7A4D`/`0x005E7AE0` (a pair in one function) and `0x00770A06` (which sits
-in the same `0x77xxxx` neighbourhood as the technique code).
+**ALL 9 WRITERS NOW ELIMINATED (2026-08-30).** Triage rule that did the work: a candidate only counts if
+its base register can be tied to a *known* entity field nearby (`+0x2BE` MST, `+0x270` freeze, `+0x336`
+TP, …). Results:
+
+| Site(s) | Verdict |
+|---|---|
+| `0x0052FCCB` / `FD10` / `FDA2` | Different struct — state selector at `+0x3A0`, sound ids `0x2DE`–`0x2E0` |
+| `0x005E7A4D` / `AE0`, `0x006EC440`, `0x006ECA84` | No entity field within ±0x900 — different structs |
+| `0x006E480D` | Bulk initialiser — uniform word writes `+0x100`…`+0x11E` from one register |
+| `0x00770A06` | **Entity confirmed** (7 known fields nearby) but it is the **constructor**, zeroing the block |
+
+**And there is no read-modify-write on `+0x116` anywhere in `.text`** — so nothing accumulates into these
+fields either.
+
+**The indexed-write lead also missed.** `0x00770D6C` / `0x00770D88` are a getter/setter pair for an int16
+array at `+0x110`, both bounds-checked against **3** — so that array is `+0x110`/`+0x112`/`+0x114` and
+stops one element short of `+0x116`.
+
+**Where that leaves it.** Something must write `+0x116`/`+0x118` with real values, yet no offset-visible
+instruction in `.text` does. The remaining explanation is a **bulk copy** (`memcpy`/`rep movs`) from a
+source structure into the entity's stat block, which offset-based scanning cannot see. That is the next
+hypothesis if anyone resumes.
+
+⛔ **Recommendation: stop the static route here.** Six rounds of scanning have produced four
+offset-collision false positives and no values. **Measure in game instead** — same technique, same level,
+two Forces, compare damage — which yields defensible numbers *and* would let a future static hunt
+recognise the right constant immediately. The two approaches are complementary now, not alternatives.
 
 ⚠ **Also still unverified:** that `(X × MST) × 0.01` is *technique damage* at all, rather than TP cost or
 another magnitude. Worth confirming before building anything on it.
