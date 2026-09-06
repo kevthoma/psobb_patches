@@ -31,7 +31,7 @@
     <OutDir>..\bin\</OutDir>
     <IntDir>..\build\obj\</IntDir>
     <TargetName>gamesettings</TargetName>
-    <TargetExt>.dll</TargetExt>
+    <TargetExt>.asi</TargetExt>
     <GenerateManifest>false</GenerateManifest>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">

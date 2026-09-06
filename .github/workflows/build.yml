@@ -155,6 +155,6 @@ jobs:
         with:
           name: gamesettings-Release-Win32
           path: |
-            psobb_gamesettings/bin/gamesettings.dll
+            psobb_gamesettings/bin/gamesettings.asi
             psobb_gamesettings/bin/gamesettings.pdb
           if-no-files-found: error
