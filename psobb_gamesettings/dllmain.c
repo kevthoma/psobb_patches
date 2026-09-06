@@ -122,6 +122,8 @@ static void store_settings(void) {
 // Hook bodies (plain C; the naked stubs below just marshal to these)
 // ---------------------------------------------------------------------------
 static void __cdecl on_dialog_constructed(BYTE* obj) {
+  BYTE mode = 0, difficulty = 0;
+
   if (!obj) {
     gs_diag("construct: NULL object -- hook fired on something unexpected");
     return;
@@ -130,16 +132,19 @@ static void __cdecl on_dialog_constructed(BYTE* obj) {
   // would mean the hook is running somewhere other than where it was meant to.
   gs_diag("construct: obj=%08X was mode=%u difficulty=%u episode=%u",
           (DWORD)obj, obj[OFF_MODE], obj[OFF_DIFFICULTY], *(DWORD*)(obj + 0x20));
-  if (!g_have_saved) {
-    gs_diag("construct: nothing saved yet, leaving defaults");
-    return;
-  }
-  obj[OFF_MODE] = g_mode;
+  // ⚠ BOTH fields must be written on EVERY call, even with nothing saved. The two stores this hook
+  // replaced were the only initialisation they get -- the object comes from a plain allocation that
+  // does not zero -- so returning early here left difficulty holding heap garbage, which the dialog
+  // could not resolve to a name and displayed as a literal "%s". Defaulting to 0 reproduces the
+  // original behaviour exactly; a saved value merely overrides it.
+  mode = g_have_saved ? g_mode : 0;
 #if RESTORE_DIFFICULTY
-  obj[OFF_DIFFICULTY] = g_difficulty;
+  difficulty = g_have_saved ? g_difficulty : 0;
 #endif
-  gs_diag("construct: restored mode=%u difficulty=%u (difficulty restore %s)",
-          obj[OFF_MODE], obj[OFF_DIFFICULTY], RESTORE_DIFFICULTY ? "on" : "OFF");
+  obj[OFF_MODE] = mode;
+  obj[OFF_DIFFICULTY] = difficulty;
+  gs_diag("construct: wrote mode=%u difficulty=%u (saved=%u, difficulty restore %s)",
+          obj[OFF_MODE], obj[OFF_DIFFICULTY], g_have_saved, RESTORE_DIFFICULTY ? "on" : "OFF");
 }
 
 static void __cdecl on_dialog_confirmed(BYTE* obj) {

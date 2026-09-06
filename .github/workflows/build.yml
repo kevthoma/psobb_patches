@@ -148,7 +148,7 @@ jobs:
           /p:WindowsTargetPlatformVersion=10.0
           /p:OutDir=..\bin_diag\
           /p:IntDir=..\obj_diag\
-          "/p:AdditionalOptions=/DGAMESETTINGS_DIAGNOSTIC=1"
+          /p:ExtraDefines=GAMESETTINGS_DIAGNOSTIC=1
           /m /v:minimal
 
       - name: Build psobb_gamesettings (Release|Win32)
@@ -162,17 +162,27 @@ jobs:
           /p:WindowsTargetPlatformVersion=10.0
           /m /v:minimal
 
-      # Both artifacts must exist. if-no-files-found only fires when EVERY path misses, so a
-      # diagnostic build that went astray would otherwise upload silently as release-only --
-      # which is how the wrong OutDir went unnoticed the first time.
-      - name: Check both builds produced an .asi
+      # Existence is not the property that matters. The first attempt passed this step while
+      # both builds were byte-identical in behaviour: /p:AdditionalOptions is a global PROPERTY
+      # and PreprocessorDefinitions is item METADATA, so the define never reached cl and the
+      # "diagnostic" build was a placebo that shipped and was installed. Check the marker.
+      - name: Verify the diagnostic build is actually diagnostic
         shell: pwsh
         run: |
-          foreach ($p in @('psobb_gamesettings\bin\gamesettings.asi',
-                           'psobb_gamesettings\bin_diag\gamesettings.asi')) {
+          $rel  = 'psobb_gamesettings\bin\gamesettings.asi'
+          $diag = 'psobb_gamesettings\bin_diag\gamesettings.asi'
+          foreach ($p in @($rel, $diag)) {
             if (-not (Test-Path $p)) { throw "missing expected artifact: $p" }
-            "{0}  {1} bytes" -f $p, (Get-Item $p).Length
           }
+          function Has-Marker($p) {
+            $b = [IO.File]::ReadAllBytes($p)
+            $t = [Text.Encoding]::ASCII.GetString($b)
+            return $t.Contains('DIAGNOSTIC BUILD') -and $t.Contains('construct:')
+          }
+          if (-not (Has-Marker $diag)) { throw 'bin_diag lacks the diagnostic strings - the define did not reach cl' }
+          if (Has-Marker $rel)        { throw 'bin release contains diagnostic strings - wrong build published' }
+          "release  {0,8} bytes" -f (Get-Item $rel).Length
+          "diagnostic {0,6} bytes" -f (Get-Item $diag).Length
 
       - name: Show build output
         run: dir psobb_gamesettings\bin
