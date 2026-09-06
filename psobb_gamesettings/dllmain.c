@@ -30,6 +30,7 @@
 #define _NO_CRT_STDIO_INLINE
 #include <windows.h>
 #include "util.h"
+#include "log.h"
 
 // ---------------------------------------------------------------------------
 // Addresses (59NL). psobb.exe has DYNAMICBASE off and its relocations stripped,
@@ -70,30 +71,13 @@ static BYTE g_have_saved = 0;
 //
 // Win32 only, no CRT: these plugins link without one (see util.h re-implementing memset).
 // ---------------------------------------------------------------------------
-static void build_settings_path(char* out, DWORD cch) {
-  DWORD n = GetModuleFileNameA(NULL, out, cch);
-  DWORD i;
-  const char* name = SETTINGS_FILE;
-
-  if (n == 0 || n >= cch) {
-    out[0] = 0;
-    return;
-  }
-  while (n > 0 && out[n - 1] != '\\' && out[n - 1] != '/')
-    n--;                                    // strip the executable's own name
-  for (i = 0; name[i] && (n + i + 1) < cch; i++)
-    out[n + i] = name[i];
-  out[n + i] = 0;
-}
-
 static void load_settings(void) {
   char path[MAX_PATH];
   HANDLE h;
   BYTE buf[4];
   DWORD got = 0;
 
-  build_settings_path(path, MAX_PATH);
-  if (!path[0])
+  if (!gs_sibling_path(path, MAX_PATH, SETTINGS_FILE))
     return;
 
   h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
@@ -106,6 +90,9 @@ static void load_settings(void) {
     g_mode = buf[2];
     g_difficulty = buf[3];
     g_have_saved = 1;
+    gs_diag("load: mode=%u difficulty=%u", g_mode, g_difficulty);
+  } else {
+    gs_diag("load: settings file present but rejected (got %u bytes)", got);
   }
   CloseHandle(h);
 }
@@ -116,8 +103,7 @@ static void store_settings(void) {
   BYTE buf[4];
   DWORD put = 0;
 
-  build_settings_path(path, MAX_PATH);
-  if (!path[0])
+  if (!gs_sibling_path(path, MAX_PATH, SETTINGS_FILE))
     return;
 
   buf[0] = SETTINGS_MAGIC;
@@ -136,19 +122,39 @@ static void store_settings(void) {
 // Hook bodies (plain C; the naked stubs below just marshal to these)
 // ---------------------------------------------------------------------------
 static void __cdecl on_dialog_constructed(BYTE* obj) {
-  if (!obj || !g_have_saved)
+  if (!obj) {
+    gs_diag("construct: NULL object -- hook fired on something unexpected");
     return;
+  }
+  // Logged BEFORE the write: the constructor should have left both at 0, so a non-zero "was" here
+  // would mean the hook is running somewhere other than where it was meant to.
+  gs_diag("construct: obj=%08X was mode=%u difficulty=%u episode=%u",
+          (DWORD)obj, obj[OFF_MODE], obj[OFF_DIFFICULTY], *(DWORD*)(obj + 0x20));
+  if (!g_have_saved) {
+    gs_diag("construct: nothing saved yet, leaving defaults");
+    return;
+  }
   obj[OFF_MODE] = g_mode;
 #if RESTORE_DIFFICULTY
   obj[OFF_DIFFICULTY] = g_difficulty;
 #endif
+  gs_diag("construct: restored mode=%u difficulty=%u (difficulty restore %s)",
+          obj[OFF_MODE], obj[OFF_DIFFICULTY], RESTORE_DIFFICULTY ? "on" : "OFF");
 }
 
 static void __cdecl on_dialog_confirmed(BYTE* obj) {
-  if (!obj)
+  if (!obj) {
+    gs_diag("confirm: NULL object");
     return;
-  if (obj[OFF_MODE] > 3 || obj[OFF_DIFFICULTY] > 3)
-    return;                                  // never persist something we would refuse to load back
+  }
+  gs_diag("confirm: obj=%08X mode=%u difficulty=%u episode=%u",
+          (DWORD)obj, obj[OFF_MODE], obj[OFF_DIFFICULTY], *(DWORD*)(obj + 0x20));
+  if (obj[OFF_MODE] > 3 || obj[OFF_DIFFICULTY] > 3) {
+    // Out of range means the offsets are wrong, not that the player did something odd -- so say so
+    // rather than failing silently.
+    gs_diag("confirm: values out of range, NOT saving (offsets may be wrong)");
+    return;
+  }
   g_mode = obj[OFF_MODE];
   g_difficulty = obj[OFF_DIFFICULTY];
   g_have_saved = 1;
@@ -224,6 +230,7 @@ static BOOL patch_gamesettings(void) {
 
 __declspec(dllexport) void __stdcall load(void) {
   if (GetImageSize(0) < 0x00762000 || *(DWORD*)0x00B613FA != 0x4C4E3935) { // 59NL
+    gs_log("wrong client version -- expected MTethVer12513 (1.25.13)");
     MessageBoxA(0, "GameSettings: Wrong client version, expected MTethVer12513 (1.25.13)",
                 "Error", MB_ICONERROR);
     return;
@@ -231,9 +238,16 @@ __declspec(dllexport) void __stdcall load(void) {
 
   load_settings();
 
-  if (!patch_gamesettings()) {
-    // Silent by design: a client that has already been patched, or a build whose bytes differ, should
-    // simply not remember settings. It must not pop a dialog on every launch over a cosmetic feature.
+  if (patch_gamesettings()) {
+    gs_log("patched ok (ctor 0x%08X, confirm 0x%08X)%s",
+           ADDR_CTOR_ZERO, ADDR_CONFIRM_CALL,
+           GAMESETTINGS_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
+  } else {
+    // No dialog: a cosmetic feature must not interrupt every launch. But it must not be silent
+    // either -- an unmatched guard means settings quietly stop being remembered, and without this
+    // line there is nothing anywhere to say why.
+    gs_log("NOT patched: hook sites did not match (ctor=%08X%08X confirm=%02X) -- feature disabled",
+           *(DWORD*)(ADDR_CTOR_ZERO + 4), *(DWORD*)ADDR_CTOR_ZERO, *(BYTE*)ADDR_CONFIRM_CALL);
     OutputDebugStringA("GameSettings: hook sites did not match; feature disabled\n");
   }
 }

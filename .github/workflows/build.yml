@@ -136,6 +136,21 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v3
 
+      # The same source with logging turned up, for confirming in game that the hooks actually
+      # fire and that the offsets are the ones intended. Separate OutDir/IntDir so it cannot
+      # share object files with the release build and quietly become it.
+      - name: Build psobb_gamesettings (diagnostic)
+        run: >
+          msbuild psobb_gamesettings\msvc\psobb_gamesettings.vcxproj
+          /p:Configuration=Release
+          /p:Platform=Win32
+          /p:PlatformToolset=v143
+          /p:WindowsTargetPlatformVersion=10.0
+          /p:OutDir=bin_diag\
+          /p:IntDir=obj_diag\
+          "/p:AdditionalOptions=/DGAMESETTINGS_DIAGNOSTIC=1"
+          /m /v:minimal
+
       - name: Build psobb_gamesettings (Release|Win32)
         # Same toolset pin as the other jobs: the runner's VS is newer than the version the
         # vcxproj selects for, so name v143 rather than falling back to an absent v141.
@@ -150,11 +165,12 @@ jobs:
       - name: Show build output
         run: dir psobb_gamesettings\bin
 
-      - name: Upload gamesettings.dll (+ symbols)
+      - name: Upload gamesettings.asi (release + diagnostic, + symbols)
         uses: actions/upload-artifact@v7
         with:
           name: gamesettings-Release-Win32
           path: |
             psobb_gamesettings/bin/gamesettings.asi
             psobb_gamesettings/bin/gamesettings.pdb
+            psobb_gamesettings/bin_diag/gamesettings.asi
           if-no-files-found: error
