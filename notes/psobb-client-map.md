@@ -421,6 +421,86 @@ fills it; the device is windowed, so there is nothing to lose on alt-tab. Confir
 and if the device does not come back the loss is handed to the client so it exits cleanly instead of
 hanging on a black screen. `d3d8_recovery.log` appears next to the game only when a loss happens.
 
+## Create-game dialog — CONFIRMED-STATIC (2026-09-06), live check pending
+
+Everything needed for **remembered game-creation settings**. Found statically; no running client was
+required, which is why this landed in one pass rather than the session of live hunting that was budgeted.
+
+**The object.** `0x38` bytes, allocated in the main arena, built by the constructor at **`0x00733F20`**,
+and stored in the global pointer **`0x00AAB24C`**. Three construction sites, one per episode entry in the
+menu — the third is gated on the Episode 4 capability flag.
+
+| Offset | Field | How it was confirmed **in our binary** |
+|---|---|---|
+| `+0x1D` | flags — bit0 = confirmed/OK, bit1 = cancelled | `test al, 1` at `0x0079ADCF` |
+| `+0x1E` | **mode** — 0 normal, 1 challenge, 2 battle, 3 one person | compared against `2`, `1`, `3` from `0x0079ADFD` on |
+| `+0x1F` | **difficulty** — 0..3 | accessor `0x007346EC` |
+| `+0x20` | episode (u32) | written from the constructor's 3rd argument at `0x00733F7C` |
+| `+0x24` | name (`wchar_t*`) | accessor `0x007346CC` — `mov eax,[ecx+0x24]`, empty-string fallback `0x008F8818` |
+| `+0x28` | password (`wchar_t*`) | accessor `0x007346DC` — `mov eax,[ecx+0x28]`, same fallback |
+
+**Accessors** (all three are real prologues at these exact addresses):
+
+```
+0x007346CC  mov eax,[ecx+0x24] / test / je -> mov eax,0x8F8818 / ret      ; name
+0x007346DC  mov eax,[ecx+0x28] / test / je -> mov eax,0x8F8818 / ret      ; password
+0x007346EC  movsx eax,byte [ecx+0x1E] / cmp eax,1 / je -> xor eax,eax     ; difficulty,
+            movsx eax,byte [ecx+0x1F] / ret                               ; forced 0 in challenge
+```
+
+That last one is the strongest single piece of evidence: it encodes a **game rule** (challenge mode has
+no difficulty) that nobody would produce by coincidence from a wrong address.
+
+**The confirm handler is `0x0079ADB8`.** It loads `[0x00AAB24C]`, tests `+0x1D & 1`, then calls the three
+accessors and reads `+0x1E` to derive battle/challenge/solo — exactly the shape of
+`C_CreateGame_BB_C1`.
+
+**⭐ Why the settings are forgotten — it is two instructions.** The constructor zeroes them:
+
+```
+0x00733F98  88 42 1E   mov byte ptr [edx+0x1E], al   ; mode       = 0   (al is 0 here)
+0x00733F9B  33 C9      xor ecx, ecx
+0x00733F9D  88 42 1F   mov byte ptr [edx+0x1F], al   ; difficulty = 0
+0x00733FA0  8B 42 20   mov eax, [edx+0x20]           ; eax is reloaded immediately after
+```
+
+**Episode does not need remembering** — it comes from the constructor argument, i.e. from *which* menu
+entry was chosen, so it is re-stated by the player every time. The feature is preserving those two bytes.
+
+### How it was found — the anchor worked exactly as written down
+
+`C_CreateGame_BB_C1` is `0x50` bytes, so the framed packet is `0x58` with command `0xC1`. The sender is
+identifiable by that fingerprint alone: a local `= 0x58`, a local `= 0xC1`, two `wcsncpy(dst, src, 0x10)`
+calls, then five bytes at payload offsets `0x48`..`0x4C`. It has exactly **one** caller, and that caller
+is the dialog handler. Anchoring on a known wire format beat searching for the UI, as predicted.
+
+⚠ **Two things that would have cost time.** Searching the binary for the command constant found nothing,
+because the header is built from a `ushort` size and a **byte** command — not the imm16 or imm32 stores
+that were searched for first (this compiler emits only 27 `66 c7` imm16 stores in all 5 MB of `.text`).
+And in the psobb.io decompilation the sender is auto-named **`send_packet0x1c`**, which is simply wrong —
+it sends `0xC1`. Both are reminders that the dump is a hypothesis: every address above was re-derived
+from our own `psobb.exe`.
+
+### ⚠ Confidence: this is *static* confirmation, not live
+
+Real prologues at the claimed addresses, offsets self-consistent, and one accessor encoding a game rule.
+That is strong, but nothing here has been watched in a running client. To promote it to **Confirmed**,
+open the create-game dialog and:
+
+```
+python tools/psobb_inspect.py read 0x00AAB24C 4        # -> object pointer
+python tools/psobb_inspect.py read <obj+0x1C> 8        # watch +0x1E / +0x1F
+```
+
+changing mode and difficulty in the dialog. Those two bytes should track the selection, and `+0x1F`
+should read 0 whenever mode is challenge.
+
+### ⚠ Open question before shipping a restore
+
+If a saved difficulty is written back for a character that has not unlocked it, does the dialog's own
+selector re-clamp it? **Not yet established** — the level gate has not been located. Until it is, treat
+"restore Ultimate onto a fresh character" as the primary in-game test, not an edge case.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,
@@ -451,7 +531,7 @@ selections is upstream of it. Better than searching for the UI directly.
 
 | Goal | Anchor | Notes |
 |---|---|---|
-| Remembered game-creation settings | C1 packet builder (`0x50` bytes) | Best first target — concrete anchor. Needs the struct feeding C1, then persist to `HKCU\Software\SonicTeam\PSOBB`. |
+| Remembered game-creation settings | **SOLVED — see the create-game dialog section above.** Object at `[0x00AAB24C]`, mode `+0x1E`, difficulty `+0x1F`, zeroed by the constructor at `0x00733F98`/`0x00733F9D`. What remains is an ASI, not discovery. | Persist per install directory rather than per registry leaf — each instance is its own install, so a file beside the client is correctly scoped without having to detect which leaf this build owns. |
 | Right-stick camera | View matrix via our `SetTransform` | Easier to *find* than the above (a continuously-changing value can be correlated) but far more work after: the auto-camera overwrites each frame, plus collision and lock-on. |
 | Inventory past 30 | `PlayerInventory` at offset 0 | Protocol side understood; the client-side wall is the 30-slot inventory UI, which has no paging. |
 | In-game volume control | `dsound.dll` proxy (single import: ordinal #1 `DirectSoundCreate`) | No game RE needed — wrap `CreateSoundBuffer` and scale per buffer. Verify the streaming-vs-static split before promising separate BGM/SE. See the sound survey above. |

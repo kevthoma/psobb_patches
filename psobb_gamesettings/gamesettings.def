@@ -1,0 +1,4 @@
+LIBRARY gamesettings
+EXPORTS
+
+load

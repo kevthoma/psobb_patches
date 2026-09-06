@@ -123,3 +123,38 @@ jobs:
           name: Corellia-launcher
           path: corellia_launcher/out/Corellia.exe
           if-no-files-found: error
+
+  gamesettings:
+    # ASI plugin: remembers the last create-game difficulty and mode. It patches two sites in
+    # psobb.exe, both guarded at runtime by the exact bytes they expect to replace -- so the
+    # thing CI protects here is simply that it still compiles, since nothing else builds the
+    # ASI plugins at all. 32-bit, same as the client.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build psobb_gamesettings (Release|Win32)
+        # Same toolset pin as the other jobs: the runner's VS is newer than the version the
+        # vcxproj selects for, so name v143 rather than falling back to an absent v141.
+        run: >
+          msbuild psobb_gamesettings\msvc\psobb_gamesettings.vcxproj
+          /p:Configuration=Release
+          /p:Platform=Win32
+          /p:PlatformToolset=v143
+          /p:WindowsTargetPlatformVersion=10.0
+          /m /v:minimal
+
+      - name: Show build output
+        run: dir psobb_gamesettings\bin
+
+      - name: Upload gamesettings.dll (+ symbols)
+        uses: actions/upload-artifact@v7
+        with:
+          name: gamesettings-Release-Win32
+          path: |
+            psobb_gamesettings/bin/gamesettings.dll
+            psobb_gamesettings/bin/gamesettings.pdb
+          if-no-files-found: error
