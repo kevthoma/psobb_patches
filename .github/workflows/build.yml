@@ -146,8 +146,8 @@ jobs:
           /p:Platform=Win32
           /p:PlatformToolset=v143
           /p:WindowsTargetPlatformVersion=10.0
-          /p:OutDir=bin_diag\
-          /p:IntDir=obj_diag\
+          /p:OutDir=..\bin_diag\
+          /p:IntDir=..\obj_diag\
           "/p:AdditionalOptions=/DGAMESETTINGS_DIAGNOSTIC=1"
           /m /v:minimal
 
@@ -161,6 +161,18 @@ jobs:
           /p:PlatformToolset=v143
           /p:WindowsTargetPlatformVersion=10.0
           /m /v:minimal
+
+      # Both artifacts must exist. if-no-files-found only fires when EVERY path misses, so a
+      # diagnostic build that went astray would otherwise upload silently as release-only --
+      # which is how the wrong OutDir went unnoticed the first time.
+      - name: Check both builds produced an .asi
+        shell: pwsh
+        run: |
+          foreach ($p in @('psobb_gamesettings\bin\gamesettings.asi',
+                           'psobb_gamesettings\bin_diag\gamesettings.asi')) {
+            if (-not (Test-Path $p)) { throw "missing expected artifact: $p" }
+            "{0}  {1} bytes" -f $p, (Get-Item $p).Length
+          }
 
       - name: Show build output
         run: dir psobb_gamesettings\bin
