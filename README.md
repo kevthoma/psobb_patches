@@ -67,11 +67,24 @@ Settings live in `widescreen.cfg`:
 | Key | Default | Meaning |
 |---|---|---|
 | `RightStickCamera` | `1` | Master on/off. |
-| `RightStickSensitivity` | `100` | Percent. 100 = 90°/second at full deflection. |
+| `RightStickSensitivity` | `100` | Percent. 100 = 100°/second at full deflection. |
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
-| `RightStickPitch` | `1` | Allow vertical look. `0` leaves height entirely to the game. |
+| `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
+| `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
+| `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
+
+**Vertical look is off by default.** It works and is clamped, but stacked on the chase camera's own
+pitch the two end up solving for height at the same time and it reads oddly in play. Set
+`RightStickPitch=1` to try it.
+
+**Recentring** hangs off the client's own Camera binding (`PAD BUTTON7` in the default pad config).
+Because the offset is added on top of the chase camera, a recentre that does not also clear the
+offset lands somewhere arbitrary; clearing it on the same press puts the camera where the player
+expects. PSO sees Xidi's virtual pad, so "BUTTON7" is a Xidi mapper index rather than an XInput
+button — under `StandardGamepad` that numbering puts the triggers at 7 and 8, which matches PSO's
+defaults (Prev/Next Page on the shoulders), hence left trigger as the default.
 
 Input comes from **XInput**, read directly, not from the game's own controller state. PSOBB's DirectInput device is opened `DISCL_EXCLUSIVE` so it cannot be shared, and the client's `DIJOYSTATE2` buffer turns out to be the Pad Button Config screen's binding-capture buffer — refreshed only while that screen is open, then frozen at its last value. Since this install ships Xidi (which exists to present an XInput pad to a DirectInput game), the physical controller is an XInput device by construction.
 

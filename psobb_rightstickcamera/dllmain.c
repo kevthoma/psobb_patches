@@ -95,8 +95,12 @@
 // -- 16 bytes total. Declared by offset rather than including XInput.h, which would drag in a
 // different SDK surface for two SHORTs.
 #define XI_STATE_BYTES      16
+#define XI_OFF_BUTTONS       4           // WORD
+#define XI_OFF_TRIGGER_L     6           // BYTE 0..255
+#define XI_OFF_TRIGGER_R     7           // BYTE 0..255
 #define XI_OFF_THUMB_RX     12
 #define XI_OFF_THUMB_RY     14
+#define XI_TRIGGER_ON       30           // XINPUT_GAMEPAD_TRIGGER_THRESHOLD
 
 // Bits of g_GenericMenuSubSelection that mean "leave the camera alone".
 //
@@ -111,8 +115,9 @@
 #define DEFAULT_SUPPRESS    0x820
 
 // Degrees per frame at full stick deflection, before RightStickSensitivity scales it. The camera
-// update runs once per frame and the client targets 30fps, so 3.0 is 90 degrees/second.
-#define BASE_DEGREES        3.0f
+// update runs once per frame and the client targets 30fps, so 3.3333 is 100 degrees/second.
+// Raised from 3.0 (90 deg/s) after the first in-game session, which read as slightly sluggish.
+#define BASE_DEGREES        3.3333333f
 
 #define PI                  3.14159265358979323846f
 #define DEG2RAD             (PI / 180.0f)
@@ -150,8 +155,26 @@ static int g_invert_x    = 0;            // RightStickInvertX
 // i.e. what most players would call inverted. Left at 0 rather than guessed at: it is one config
 // line either way, and shipping a wrong "fix" is worse than shipping the raw axis.
 static int g_invert_y    = 0;            // RightStickInvertY
-static int g_allow_pitch = 1;            // RightStickPitch
+// ⚠ Vertical look is OFF by default. It works, but riding on top of the chase camera's own pitch it
+// reads as strange in game -- the two are solving for height at the same time. Left in behind a
+// switch rather than deleted: the maths and the clamps are the tested part, the feel is not.
+static int g_allow_pitch = 0;            // RightStickPitch
 static int g_suppress    = DEFAULT_SUPPRESS;
+
+// Recentring. The client's own Camera binding (PAD BUTTON7 in the default pad config) re-aims the
+// chase camera behind the character -- but our offset is added on top of that, so without clearing
+// it the recentre lands somewhere arbitrary. Zero the offset on the same press and it lands where
+// the player expects.
+//
+// ⚠ Which XInput control that is cannot be read off the client: PSO sees Xidi's virtual DirectInput
+// pad, and "PAD BUTTON7" is a Xidi mapper index, not an XInput button. Under StandardGamepad the
+// numbering puts the triggers at 7 and 8, which fits PSO's defaults exactly (Prev Page/Camera =
+// BUTTON7, Next Page = BUTTON8 -- i.e. the shoulder triggers page through). Hence left trigger as
+// the default. A diagnostic build logs the raw button word and both triggers, so if it is wrong the
+// log names the right one and it is a config line, not a rebuild.
+static int g_recentre_trigger = 1;       // RightStickRecentreTrigger: 0 none, 1 LT, 2 RT, 3 either
+static int g_recentre_mask    = 0;       // RightStickRecentreMask: raw XInput wButtons bitmask
+static int g_recentre_held    = 0;       // edge detection -- fire on press, not every held frame
 
 // XInput, resolved at load. NULL means no usable XInput DLL and therefore no camera control.
 typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD dwUserIndex, void* pState);
@@ -241,6 +264,8 @@ static void load_config(void) {
   g_invert_y    = cfg_int(buf, got, "RightStickInvertY", g_invert_y) ? 1 : 0;
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
+  g_recentre_trigger = cfg_int(buf, got, "RightStickRecentreTrigger", g_recentre_trigger);
+  g_recentre_mask    = cfg_int(buf, got, "RightStickRecentreMask", g_recentre_mask);
 
   if (g_sensitivity < 1) g_sensitivity = 1;
   if (g_sensitivity > 1000) g_sensitivity = 1000;
@@ -334,21 +359,36 @@ static void xinput_init(void) {
   rsc_log("xinput: no usable XInput DLL -- right stick unavailable");
 }
 
-// Right stick as two floats in -1..1, or 0 if there is no connected pad. Unlike the g_joyState
-// buffer this replaced, "not connected" is an explicit answer, so a missing pad can never be
-// mistaken for a held stick.
-static int read_right_stick(float* out_x, float* out_y) {
+// Everything we need from the pad in one read. Unlike the g_joyState buffer this replaced, "not
+// connected" is an explicit answer, so a missing pad can never be mistaken for a held stick.
+typedef struct {
+  float rx, ry;                          // right stick, -1..1 about centre
+  WORD  buttons;                         // raw XInput wButtons
+  BYTE  lt, rt;                          // triggers, 0..255
+} pad_state;
+
+static void decode_pad(const BYTE* st, pad_state* p) {
+  p->rx      = (float)(*(short*)(st + XI_OFF_THUMB_RX)) / XI_THUMB_SCALE;
+  p->ry      = (float)(*(short*)(st + XI_OFF_THUMB_RY)) / XI_THUMB_SCALE;
+  p->buttons = *(WORD*)(st + XI_OFF_BUTTONS);
+  p->lt      = st[XI_OFF_TRIGGER_L];
+  p->rt      = st[XI_OFF_TRIGGER_R];
+}
+
+static int read_pad(pad_state* p) {
   BYTE st[XI_STATE_BYTES];
   DWORD i;
 
+  p->rx = p->ry = 0.0f;
+  p->buttons = 0;
+  p->lt = p->rt = 0;
   if (!g_xinput_get_state)
     return 0;
 
   // Fast path: the slot we already know about.
   if (g_xi_user >= 0) {
     if (g_xinput_get_state((DWORD)g_xi_user, st) == ERROR_SUCCESS) {
-      *out_x = (float)(*(short*)(st + XI_OFF_THUMB_RX)) / XI_THUMB_SCALE;
-      *out_y = (float)(*(short*)(st + XI_OFF_THUMB_RY)) / XI_THUMB_SCALE;
+      decode_pad(st, p);
       return 1;
     }
     g_xi_user = -1;                      // unplugged
@@ -362,12 +402,22 @@ static int read_right_stick(float* out_x, float* out_y) {
   for (i = 0; i < XI_MAX_USERS; i++) {
     if (g_xinput_get_state(i, st) == ERROR_SUCCESS) {
       g_xi_user = (int)i;
-      *out_x = (float)(*(short*)(st + XI_OFF_THUMB_RX)) / XI_THUMB_SCALE;
-      *out_y = (float)(*(short*)(st + XI_OFF_THUMB_RY)) / XI_THUMB_SCALE;
+      decode_pad(st, p);
       return 1;
     }
   }
   g_xi_rescan = XI_RESCAN_FRAMES;
+  return 0;
+}
+
+// Is the recentre control down this frame?
+static int recentre_down(const pad_state* p) {
+  if (g_recentre_mask && (p->buttons & (WORD)g_recentre_mask))
+    return 1;
+  if ((g_recentre_trigger & 1) && p->lt >= XI_TRIGGER_ON)
+    return 1;
+  if ((g_recentre_trigger & 2) && p->rt >= XI_TRIGGER_ON)
+    return 1;
   return 0;
 }
 
@@ -401,8 +451,8 @@ static void __cdecl on_camera_updated(void) {
   float vx, vy, vz, h, r;
   float dyaw, dpitch, s, c, nx, nz, nh, ny;
   float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
-  float stick_x = 0.0f, stick_y = 0.0f;
-  int have_pad;
+  pad_state pad;
+  int have_pad, recentre;
 
   g_frames++;
   if (!cam)
@@ -411,18 +461,28 @@ static void __cdecl on_camera_updated(void) {
   src = (vec3f*)(cam + OFF_DESIRED_SOURCE);
   tgt = (vec3f*)(cam + OFF_DESIRED_TARGET);
 
-  // Read the pad exactly ONCE per frame. read_right_stick has side effects -- it caches the
-  // connected slot and counts down the rescan backoff -- so calling it a second time just for the
-  // log would make diagnostic builds behave differently from release ones.
-  have_pad = read_right_stick(&stick_x, &stick_y);
+  // Read the pad exactly ONCE per frame. read_pad has side effects -- it caches the connected slot
+  // and counts down the rescan backoff -- so calling it a second time just for the log would make
+  // diagnostic builds behave differently from release ones.
+  have_pad = read_pad(&pad);
+
+  // Recentre on the PRESS, not every frame the control is held: holding it would otherwise pin the
+  // offset at zero and make the stick appear dead.
+  recentre = have_pad && recentre_down(&pad);
+  if (recentre && !g_recentre_held) {
+    g_yaw_offset = 0.0f;
+    g_pitch_offset = 0.0f;
+  }
+  g_recentre_held = recentre;
 
 #if RSC_DIAGNOSTIC
   if ((g_frames % RSC_DIAG_EVERY) == 0) {
     // Whether a pad is seen at all, what it reads, and the live menu mask -- the three things that
     // distinguish "not connected" from "connected but suppressed" from "working".
-    rsc_diag("xinput slot=%d connected=%d rx=%d/1000 ry=%d/1000 | menuflags=%08X | "
-             "yaw=%d/1000 pitch=%d/1000",
-             g_xi_user, have_pad, f_toint(stick_x * 1000.0f), f_toint(stick_y * 1000.0f),
+    rsc_diag("xinput slot=%d connected=%d rx=%d/1000 ry=%d/1000 btn=%04X lt=%d rt=%d "
+             "recentre=%d | menuflags=%08X | yaw=%d/1000 pitch=%d/1000",
+             g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
+             pad.buttons, pad.lt, pad.rt, recentre,
              flags, f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f));
   }
 #endif
@@ -439,14 +499,17 @@ static void __cdecl on_camera_updated(void) {
   // Accumulate only when there is a pad to read. With none, the offset simply holds where it is --
   // that is "no new input", not "recentre the camera".
   if (have_pad) {
-    dyaw = shape_axis(stick_x, g_invert_x) * rate;
+    // Negated after the first in-game session: pushing the stick right must swing the view right,
+    // and the unnegated sense read backwards. RightStickInvertX now means "the other way from the
+    // one that felt natural", which is what an invert switch should mean.
+    dyaw = shape_axis(-pad.rx, g_invert_x) * rate;
     g_yaw_offset = wrap_angle(g_yaw_offset + dyaw);
 
     if (g_allow_pitch) {
       // XInput's Y is positive-UP, and a positive pitch here RAISES the eye (i.e. looks further
       // down). Negating makes stick-forward look up, which is the un-inverted convention;
       // RightStickInvertY then means what its name says.
-      dpitch = shape_axis(-stick_y, g_invert_y) * rate;
+      dpitch = shape_axis(-pad.ry, g_invert_y) * rate;
       g_pitch_offset += dpitch;
       if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
       if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
@@ -559,9 +622,10 @@ __declspec(dllexport) void __stdcall load(void) {
 
   if (patch_camera()) {
     rsc_log("patched ok (call %08X -> hook) sens=%d%% deadzone=%d%% pitch=%s invX=%d invY=%d "
-            "suppress=%03X xinput=%s%s",
+            "recentre(trig=%d mask=%04X) suppress=%03X xinput=%s%s",
             ADDR_UPDATE_CALL, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_suppress, g_xinput_get_state ? "ok" : "MISSING",
+            g_invert_x, g_invert_y, g_recentre_trigger, g_recentre_mask, g_suppress,
+            g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
     // No dialog: a camera feature must not interrupt every launch. But it must not be silent
