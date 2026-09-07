@@ -42,6 +42,16 @@
 #define ADDR_CONFIRM_CALL   0x0079ADD7   // `call 0x007346CC` inside the confirm handler at 0x0079ADB8
 #define ADDR_GET_NAME       0x007346CC   // accessor the confirm path calls first, with ecx = the object
 
+// Calling into the client's own code. Conventions read off the call sites, not assumed:
+//   get_string   0x0079317C  __cdecl, caller cleans one arg, returns the string in eax
+//   set_line_text 0x00738A40 __thiscall (ecx = widget), args (string, line), CALLEE cleans -- there
+//                            is no `add esp,8` after either of the game's own two call sites
+#define ADDR_GET_STRING     0x0079317C
+#define ADDR_SET_LINE_TEXT  0x00738A40
+#define STRID_MODE_BASE     0x139        // 0x139..0x13C = Normal / Challenge / Battle / One Person
+#define OFF_MENU_WIDGET     0x2C         // set at 0x00733F87, before the hook that calls this
+#define LINE_PLAY_MODE      2            // the index the game passes for that line
+
 #define OFF_MODE            0x1E         // 0 normal, 1 challenge, 2 battle, 3 one person
 #define OFF_DIFFICULTY      0x1F         // 0..3; the accessor forces 0 when mode == challenge
 
@@ -121,9 +131,59 @@ static void store_settings(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Calling the client's own label machinery
+// ---------------------------------------------------------------------------
+static void* gs_get_string(int id) {
+  void* result;
+  __asm {
+    push id
+    mov  eax, ADDR_GET_STRING
+    call eax
+    add  esp, 4                                          // __cdecl: we clean
+    mov  result, eax
+  }
+  return result;
+}
+
+static void gs_set_line_text(void* widget, void* text, int line) {
+  __asm {
+    push line
+    push text
+    mov  ecx, widget                                     // __thiscall
+    mov  eax, ADDR_SET_LINE_TEXT
+    call eax                                             // callee cleans the two args
+  }
+}
+
+// The builder hardcodes this line to "Normal" (string 0x139) whatever the field says, so a restored
+// mode has to be pushed into the label explicitly or the dialog will claim Normal while creating
+// something else -- which is worse than not restoring at all.
+static void gs_refresh_mode_label(BYTE* obj, BYTE mode) {
+  void* widget;
+  void* text;
+
+  if (mode > 3)
+    return;
+  widget = *(void**)(obj + OFF_MENU_WIDGET);
+  if (!widget) {
+    gs_diag("label: no menu widget at +0x%02X, skipping", OFF_MENU_WIDGET);
+    return;
+  }
+  text = gs_get_string(STRID_MODE_BASE + mode);
+  if (!text) {
+    gs_diag("label: get_string(0x%X) returned NULL", STRID_MODE_BASE + mode);
+    return;
+  }
+  gs_set_line_text(widget, text, LINE_PLAY_MODE);
+  gs_diag("label: Play Mode line set from string 0x%X", STRID_MODE_BASE + mode);
+}
+
+// ---------------------------------------------------------------------------
 // Hook bodies (plain C; the naked stubs below just marshal to these)
 // ---------------------------------------------------------------------------
-static void __cdecl on_dialog_constructed(BYTE* obj) {
+// after_build distinguishes the two call sites: before the menu is built (+0x2C not yet set) and
+// after the constructor clears the fields. Only the second can touch the label.
+static void __cdecl on_dialog_write(BYTE* obj, int after_build) {
   BYTE mode = 0, difficulty = 0;
 
   if (!obj) {
@@ -147,6 +207,8 @@ static void __cdecl on_dialog_constructed(BYTE* obj) {
   obj[OFF_DIFFICULTY] = difficulty;
   gs_diag("write: now mode=%u difficulty=%u (saved=%u, difficulty restore %s)",
           obj[OFF_MODE], obj[OFF_DIFFICULTY], g_have_saved, RESTORE_DIFFICULTY ? "on" : "OFF");
+  if (after_build)
+    gs_refresh_mode_label(obj, mode);
 }
 
 static void __cdecl on_dialog_confirmed(BYTE* obj) {
@@ -179,9 +241,10 @@ static void __cdecl on_dialog_confirmed(BYTE* obj) {
 void __declspec(naked) preBuildHook(void) {
   __asm {
     pushad
+    push 0                                               // before the build: +0x2C is not set yet
     push ecx
-    call on_dialog_constructed
-    add  esp, 4
+    call on_dialog_write
+    add  esp, 8
     popad
     mov  eax, ADDR_MENUBUILD
     jmp  eax
@@ -193,9 +256,10 @@ void __declspec(naked) preBuildHook(void) {
 void __declspec(naked) restoreHook(void) {
   __asm {
     pushad
+    push 1                                               // after_build: widget exists, label can be set
     push edx
-    call on_dialog_constructed
-    add  esp, 4
+    call on_dialog_write
+    add  esp, 8
     popad
     xor  ecx, ecx                                        // reproduce the overwritten `xor ecx, ecx`
     ret
