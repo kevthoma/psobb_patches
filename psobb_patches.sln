@@ -9,6 +9,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_largeassets", "psobb_
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_moresaveslots", "psobb_moresaveslots\msvc\psobb_moresaveslots.vcxproj", "{5C9D900E-8DD5-4B99-BE6A-56865F343EBA}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_gamesettings", "psobb_gamesettings\msvc\psobb_gamesettings.vcxproj", "{B3AA37E0-ADA7-4C3F-84CA-38077DABC6FF}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "d3d8to9", "psobb_widescreen\d3d8to9.vcxproj", "{7EE21ADA-3B02-4CD6-A891-C2257A54B061}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_dsound", "psobb_dsound\msvc\psobb_dsound.vcxproj", "{96BA4682-7812-4DE1-AADB-FBB3DBA32BE7}"
@@ -31,6 +33,10 @@ Global
 		{5C9D900E-8DD5-4B99-BE6A-56865F343EBA}.Debug|Win32.Build.0 = Release|Win32
 		{5C9D900E-8DD5-4B99-BE6A-56865F343EBA}.Release|Win32.ActiveCfg = Release|Win32
 		{5C9D900E-8DD5-4B99-BE6A-56865F343EBA}.Release|Win32.Build.0 = Release|Win32
+		{B3AA37E0-ADA7-4C3F-84CA-38077DABC6FF}.Debug|Win32.ActiveCfg = Release|Win32
+		{B3AA37E0-ADA7-4C3F-84CA-38077DABC6FF}.Debug|Win32.Build.0 = Release|Win32
+		{B3AA37E0-ADA7-4C3F-84CA-38077DABC6FF}.Release|Win32.ActiveCfg = Release|Win32
+		{B3AA37E0-ADA7-4C3F-84CA-38077DABC6FF}.Release|Win32.Build.0 = Release|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Debug|Win32.ActiveCfg = Debug|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Debug|Win32.Build.0 = Debug|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Release|Win32.ActiveCfg = Release|Win32
