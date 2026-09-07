@@ -112,6 +112,14 @@
 
 typedef struct { float x, y, z; } vec3f;
 
+// ⚠ Required because this is the first plugin in the repo to use floating point. MSVC emits a
+// reference to __fltused from any object file that touches a float -- it is not a function, just a
+// marker the CRT defines so its startup code knows to initialise FP support. This project links no
+// CRT (/kernel + OmitDefaultLibName), so nothing defines it and the link fails with LNK2001 even
+// though every line compiled cleanly. On x86 the compiler prefixes C symbols with an underscore, so
+// `_fltused` here is the `__fltused` the linker is asking for. The value is never read.
+int _fltused = 0;
+
 // ---------------------------------------------------------------------------
 // Configuration (widescreen.cfg, same file and parser style as the other plugins)
 // ---------------------------------------------------------------------------
