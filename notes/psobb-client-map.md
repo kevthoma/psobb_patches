@@ -421,7 +421,7 @@ fills it; the device is windowed, so there is nothing to lose on alt-tab. Confir
 and if the device does not come back the loss is handed to the client so it exits cleanly instead of
 hanging on a black screen. `d3d8_recovery.log` appears next to the game only when a loss happens.
 
-## Create-game dialog — CONFIRMED-STATIC (2026-09-06), live check pending
+## Create-game dialog — CONFIRMED LIVE (2026-09-07)
 
 Everything needed for **remembered game-creation settings**. Found statically; no running client was
 required, which is why this landed in one pass rather than the session of live hunting that was budgeted.
@@ -481,25 +481,80 @@ And in the psobb.io decompilation the sender is auto-named **`send_packet0x1c`**
 it sends `0xC1`. Both are reminders that the dump is a hypothesis: every address above was re-derived
 from our own `psobb.exe`.
 
-### ⚠ Confidence: this is *static* confirmation, not live
+### ⭐ THREE display paths, and they do NOT agree — this is what the work actually cost
 
-Real prologues at the claimed addresses, offsets self-consistent, and one accessor encoding a game rule.
-That is strong, but nothing here has been watched in a running client. To promote it to **Confirmed**,
-open the create-game dialog and:
+Restoring the two fields is trivial. Making the dialog *agree with itself* took four rounds, because
+three different things show mode and only one of them reads the field:
+
+| What | Source | Behaviour |
+|---|---|---|
+| Popup list cursor | reads `+0x1E` at `0x007345F6` | follows the field ✅ |
+| **Play Mode summary line** | **`xor eax,eax` at `0x00733FE0`** | **hardcoded to "Normal" — never reads the field** ⛔ |
+| Difficulty summary line | reads `+0x1F` | follows the field ✅ |
+
+`0x00733FE0` is the one that matters:
 
 ```
-python tools/psobb_inspect.py read 0x00AAB24C 4        # -> object pointer
-python tools/psobb_inspect.py read <obj+0x1C> 8        # watch +0x1E / +0x1F
+0x00733FDF  push edi
+0x00733FE0  xor eax, eax        ; mode, HARDCODED
+0x00733FE2  call 0x00734079     ; get_string(0x139 + eax) -> "Normal"
+0x00733FEB  push 2              ; line 2 = Play Mode
+0x00733FF1  call 0x00738A40     ; set the summary text
 ```
 
-changing mode and difficulty in the dialog. Those two bytes should track the selection, and `+0x1F`
-should read 0 whenever mode is challenge.
+In the stock client this is invisible: the field is set to 0 immediately after, so the label happens to
+be right. Restore a non-zero mode and the dialog says Normal while creating something else.
 
-### ⚠ Open question before shipping a restore
+⚠ **The lesson, which generalises past this dialog:** a label that looks stale may never have read the
+value at all. Two attempts were spent on ordering — writing earlier, then writing the text ourselves —
+before checking what actually fed the label. **Find the label's source before assuming it is stale.**
+The clue that cracked it was Kevin's: *selecting Battle by hand updates it* — i.e. the commit path
+passes a real value where the constructor passes a literal.
 
-If a saved difficulty is written back for a character that has not unlocked it, does the dialog's own
-selector re-clamp it? **Not yet established** — the level gate has not been located. Until it is, treat
-"restore Ultimate onto a fresh character" as the primary in-game test, not an edge case.
+Also: the constructor's two zeroing stores are the ONLY initialisation `+0x1E`/`+0x1F` get. The object
+comes from a plain allocation that does not zero, so a hook that writes them *conditionally* leaves heap
+garbage behind — which the difficulty label renders as a literal `%s`. Replace an unconditional store
+only with another unconditional store.
+
+### Four patch sites, all guarded on opcode AND resolved call target
+
+| Address | Original | Why |
+|---|---|---|
+| `0x00733F7F` | `call 0x00734000` | write the fields before the popup list is built |
+| `0x00733F98` | the two zeroing stores | write them again after the constructor clears them |
+| `0x00733FE0` | `xor eax,eax` + call | supply the real mode to the summary label |
+| `0x0079ADD7` | `call 0x007346CC` | capture the values on confirm |
+
+### Text fields — mapped for the Party Name / Password follow-up
+
+`+0x24`/`+0x28` are **pointers**, not inline buffers, and the dialog does not own them: an edit widget
+is created on demand at `0x00734216` / `0x00734330`, stored at `+0x34`, and destroyed after. `get_text`
+(`0x0078ED4C`) **mallocs** its return via `0x008581C5` and that pointer is what gets stored.
+
+* **`widget_set_text` = `0x0078ED74`** — `__thiscall(ecx = widget, const wchar_t*)`, callee-cleaned.
+  Forwards to `0x007310EC`, which wcslens, **clamps to 127 chars**, allocates `len*2+2` and copies.
+* Both creation sites end `mov eax,[ebp-0x14]; mov [eax+0x34], edx` — 6 bytes, enough for a call+nop.
+* ⚠ Unresolved: which site is name and which is password (proximity suggests `0x00734216`→password,
+  `0x00734330`→name, but that is layout inference, not a trace); whether anything frees `+0x24`/`+0x28`
+  (if so, they must be filled with the client's own allocator, not a static buffer); and whether those
+  summary lines are hardcoded like Play Mode was.
+
+### Calling into the client (conventions read off its own call sites, never assumed)
+
+```
+get_string      0x0079317C  __cdecl,    caller cleans 1 arg,  returns string in eax
+mode label      0x00734079  arg in AL,  returns get_string(0x139 + al)
+difficulty      0x00734091  arg in AL,  returns get_string(0x13D + al)
+set_line_text   0x00738A40  __thiscall(ecx = menu widget at +0x2C), args (string, line), CALLEE cleans
+widget_set_text 0x0078ED74  __thiscall(ecx = edit widget), arg (wchar_t*),               CALLEE cleans
+```
+
+The absence of an `add esp,N` after the game's own calls is what identifies callee cleanup.
+
+### Still unverified
+
+Whether restoring a difficulty the character has not unlocked is re-clamped by the dialog. The level
+gate was never located. `RESTORE_DIFFICULTY` in the plugin exists to turn that half off.
 
 ## Structures (protocol side, from newserv — reliable)
 
@@ -531,7 +586,7 @@ selections is upstream of it. Better than searching for the UI directly.
 
 | Goal | Anchor | Notes |
 |---|---|---|
-| Remembered game-creation settings | **SOLVED — see the create-game dialog section above.** Object at `[0x00AAB24C]`, mode `+0x1E`, difficulty `+0x1F`, zeroed by the constructor at `0x00733F98`/`0x00733F9D`. What remains is an ASI, not discovery. | Persist per install directory rather than per registry leaf — each instance is its own install, so a file beside the client is correctly scoped without having to detect which leaf this build owns. |
+| Remembered game-creation settings | **DONE — mode + difficulty, confirmed in game 2026-09-07** (`psobb_gamesettings`). See the create-game dialog section for the four patch sites and the three-display-paths trap. Party Name / Password are mapped but not built. | Persist per install directory rather than per registry leaf — each instance is its own install, so a file beside the client is correctly scoped without having to detect which leaf this build owns. |
 | Right-stick camera | View matrix via our `SetTransform` | Easier to *find* than the above (a continuously-changing value can be correlated) but far more work after: the auto-camera overwrites each frame, plus collision and lock-on. |
 | Inventory past 30 | `PlayerInventory` at offset 0 | Protocol side understood; the client-side wall is the 30-slot inventory UI, which has no paging. |
 | In-game volume control | `dsound.dll` proxy (single import: ordinal #1 `DirectSoundCreate`) | No game RE needed — wrap `CreateSoundBuffer` and scale per buffer. Verify the streaming-vs-static split before promising separate BGM/SE. See the sound survey above. |
