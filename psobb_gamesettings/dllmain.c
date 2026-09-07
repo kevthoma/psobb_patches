@@ -42,15 +42,13 @@
 #define ADDR_CONFIRM_CALL   0x0079ADD7   // `call 0x007346CC` inside the confirm handler at 0x0079ADB8
 #define ADDR_GET_NAME       0x007346CC   // accessor the confirm path calls first, with ecx = the object
 
-// Calling into the client's own code. Conventions read off the call sites, not assumed:
-//   get_string   0x0079317C  __cdecl, caller cleans one arg, returns the string in eax
-//   set_line_text 0x00738A40 __thiscall (ecx = widget), args (string, line), CALLEE cleans -- there
-//                            is no `add esp,8` after either of the game's own two call sites
-#define ADDR_GET_STRING     0x0079317C
-#define ADDR_SET_LINE_TEXT  0x00738A40
-#define STRID_MODE_BASE     0x139        // 0x139..0x13C = Normal / Challenge / Battle / One Person
-#define OFF_MENU_WIDGET     0x2C         // set at 0x00733F87, before the hook that calls this
-#define LINE_PLAY_MODE      2            // the index the game passes for that line
+// The constructor labels the Play Mode summary line with a hardcoded 0 rather than the field:
+//   0x00733FE0  xor eax, eax        <-- always "Normal"
+//   0x00733FE2  call 0x00734079     ; get_string(0x139 + eax)
+// Patch those seven bytes to fetch the real mode. 0x00734079 takes its argument in AL and returns
+// the string in EAX, so a stub can load the field and tail-jump straight to it.
+#define ADDR_MODE_LABEL_ARG 0x00733FE0   // `xor eax,eax` + `call 0x00734079`, 7 bytes
+#define ADDR_MODE_LABEL_FN  0x00734079   // get_string(0x139 + al)
 
 #define OFF_MODE            0x1E         // 0 normal, 1 challenge, 2 battle, 3 one person
 #define OFF_DIFFICULTY      0x1F         // 0..3; the accessor forces 0 when mode == challenge
@@ -131,54 +129,6 @@ static void store_settings(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Calling the client's own label machinery
-// ---------------------------------------------------------------------------
-static void* gs_get_string(int id) {
-  void* result;
-  __asm {
-    push id
-    mov  eax, ADDR_GET_STRING
-    call eax
-    add  esp, 4                                          // __cdecl: we clean
-    mov  result, eax
-  }
-  return result;
-}
-
-static void gs_set_line_text(void* widget, void* text, int line) {
-  __asm {
-    push line
-    push text
-    mov  ecx, widget                                     // __thiscall
-    mov  eax, ADDR_SET_LINE_TEXT
-    call eax                                             // callee cleans the two args
-  }
-}
-
-// The builder hardcodes this line to "Normal" (string 0x139) whatever the field says, so a restored
-// mode has to be pushed into the label explicitly or the dialog will claim Normal while creating
-// something else -- which is worse than not restoring at all.
-static void gs_refresh_mode_label(BYTE* obj, BYTE mode) {
-  void* widget;
-  void* text;
-
-  if (mode > 3)
-    return;
-  widget = *(void**)(obj + OFF_MENU_WIDGET);
-  if (!widget) {
-    gs_diag("label: no menu widget at +0x%02X, skipping", OFF_MENU_WIDGET);
-    return;
-  }
-  text = gs_get_string(STRID_MODE_BASE + mode);
-  if (!text) {
-    gs_diag("label: get_string(0x%X) returned NULL", STRID_MODE_BASE + mode);
-    return;
-  }
-  gs_set_line_text(widget, text, LINE_PLAY_MODE);
-  gs_diag("label: Play Mode line set from string 0x%X", STRID_MODE_BASE + mode);
-}
-
-// ---------------------------------------------------------------------------
 // Hook bodies (plain C; the naked stubs below just marshal to these)
 // ---------------------------------------------------------------------------
 // after_build distinguishes the two call sites: before the menu is built (+0x2C not yet set) and
@@ -207,8 +157,7 @@ static void __cdecl on_dialog_write(BYTE* obj, int after_build) {
   obj[OFF_DIFFICULTY] = difficulty;
   gs_diag("write: now mode=%u difficulty=%u (saved=%u, difficulty restore %s)",
           obj[OFF_MODE], obj[OFF_DIFFICULTY], g_have_saved, RESTORE_DIFFICULTY ? "on" : "OFF");
-  if (after_build)
-    gs_refresh_mode_label(obj, mode);
+  (void)after_build;
 }
 
 static void __cdecl on_dialog_confirmed(BYTE* obj) {
@@ -233,6 +182,21 @@ static void __cdecl on_dialog_confirmed(BYTE* obj) {
 // ---------------------------------------------------------------------------
 // Naked stubs
 // ---------------------------------------------------------------------------
+
+// Supplies the Play Mode summary label's argument, replacing the constructor's hardcoded zero.
+// edx = the dialog object here; 0x00734079 wants the mode in AL and returns the string in EAX, so
+// tail-jumping to it puts the right string in the right register for the caller.
+void __declspec(naked) modeLabelHook(void) {
+  __asm {
+    movsx eax, byte ptr [edx + OFF_MODE]
+    cmp   eax, 3
+    jbe   ok
+    xor   eax, eax                                       // out of range: behave exactly as before
+  ok:
+    mov   ecx, ADDR_MODE_LABEL_FN
+    jmp   ecx                                            // its ret lands after our call site
+  }
+}
 
 // Runs immediately before the constructor builds the dialog's menu lines, with ecx = the object.
 // The Play Mode label is chosen here and never refreshed, so the value has to be in place BEFORE
@@ -291,6 +255,7 @@ void __declspec(naked) saveHook(void) {
 static BOOL patch_gamesettings(void) {
   DWORD confirm_target;
   DWORD menubuild_target;
+  DWORD modelabel_target;
 
   // Refuse to patch anything that is not byte-for-byte what was analysed. A wrong address here writes
   // a call into the middle of unrelated code, which would fault far away from the cause.
@@ -309,6 +274,13 @@ static BOOL patch_gamesettings(void) {
   if (menubuild_target != ADDR_MENUBUILD)
     return FALSE;
 
+  if (*(WORD*)ADDR_MODE_LABEL_ARG != 0xC033 ||           // xor eax, eax
+      *(BYTE*)(ADDR_MODE_LABEL_ARG + 2) != 0xE8)
+    return FALSE;
+  modelabel_target = (DWORD)(ADDR_MODE_LABEL_ARG + 7 + *(LONG*)(ADDR_MODE_LABEL_ARG + 3));
+  if (modelabel_target != ADDR_MODE_LABEL_FN)
+    return FALSE;
+
   // Constructor: 8 bytes -> call rel32 + 3 nops.
   *(BYTE*)(ADDR_CTOR_ZERO) = 0xE8;
   *(DWORD*)(ADDR_CTOR_ZERO + 1) = calc_disp32(ADDR_CTOR_ZERO + 1, (ULONG_PTR)restoreHook);
@@ -318,6 +290,13 @@ static BOOL patch_gamesettings(void) {
 
   // Menu build: same retarget idiom, so the labels are built from the restored values.
   *(DWORD*)(ADDR_MENUBUILD_CALL + 1) = calc_disp32(ADDR_MENUBUILD_CALL + 1, (ULONG_PTR)preBuildHook);
+
+  // Play Mode label: 7 bytes -> call rel32 + 2 nops. The stub supplies the argument the
+  // constructor hardcoded to zero.
+  *(BYTE*)(ADDR_MODE_LABEL_ARG) = 0xE8;
+  *(DWORD*)(ADDR_MODE_LABEL_ARG + 1) = calc_disp32(ADDR_MODE_LABEL_ARG + 1, (ULONG_PTR)modeLabelHook);
+  *(BYTE*)(ADDR_MODE_LABEL_ARG + 5) = 0x90;
+  *(BYTE*)(ADDR_MODE_LABEL_ARG + 6) = 0x90;
 
   // Confirm path: retarget the existing call to us; we tail-jump to where it went.
   *(DWORD*)(ADDR_CONFIRM_CALL + 1) = calc_disp32(ADDR_CONFIRM_CALL + 1, (ULONG_PTR)saveHook);
@@ -336,8 +315,8 @@ __declspec(dllexport) void __stdcall load(void) {
   load_settings();
 
   if (patch_gamesettings()) {
-    gs_log("patched ok (menubuild 0x%08X, ctor 0x%08X, confirm 0x%08X)%s",
-           ADDR_MENUBUILD_CALL, ADDR_CTOR_ZERO, ADDR_CONFIRM_CALL,
+    gs_log("patched ok (menubuild 0x%08X, ctor 0x%08X, label 0x%08X, confirm 0x%08X)%s",
+           ADDR_MENUBUILD_CALL, ADDR_CTOR_ZERO, ADDR_MODE_LABEL_ARG, ADDR_CONFIRM_CALL,
            GAMESETTINGS_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
     // No dialog: a cosmetic feature must not interrupt every launch. But it must not be silent
