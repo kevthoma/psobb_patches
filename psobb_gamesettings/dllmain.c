@@ -1,7 +1,12 @@
 // GameSettings 1.25.13 (59NL)
 //
-// Remembers the last create-game selections -- difficulty and mode -- so the dialog comes up where you
-// left it instead of resetting to Normal every time.
+// Remembers the last create-game selections -- play mode, difficulty, party name and password -- so
+// the dialog comes up where you left it instead of resetting every time.
+//
+// The whole feature is OPT-IN and off by default, gated on RememberPartyInfo in widescreen.cfg, which
+// the launcher's options window writes. That mirrors Ephinea's single SAVE_PARTY_INFO switch. The
+// password is the part that earns the gate: a secret at rest, and a restore that goes wrong changes
+// who can join a game.
 //
 // WHY THIS IS SMALL: the client does not "fail to save" these; it actively clears them. The party
 // creation menu object is constructed fresh each time the dialog opens, and its constructor zeroes the
@@ -90,7 +95,7 @@ static BYTE  g_difficulty = 0;
 static BYTE  g_have_saved = 0;
 static WCHAR g_name[FIELD_WCHARS];
 static WCHAR g_password[FIELD_WCHARS];
-static BYTE  g_remember_text = 0;        // the launcher's RememberPartyInfo, OFF unless enabled
+static BYTE  g_remember = 0;             // the launcher's RememberPartyInfo; gates ALL of it
 
 static int gs_wlen(const WCHAR* w) {
   int n = 0;
@@ -127,7 +132,7 @@ static void load_remember_flag(void) {
   DWORD got = 0, i;
   const char* key = "RememberPartyInfo";
 
-  g_remember_text = 0;
+  g_remember = 0;
   if (!gs_sibling_path(path, MAX_PATH, "widescreen.cfg"))
     return;
   h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
@@ -156,10 +161,10 @@ static void load_remember_flag(void) {
       continue;                              // the name, but not as a key
     k++;
     while (k < got && (buf[k] == ' ' || buf[k] == '\t')) k++;
-    g_remember_text = (k < got && buf[k] == '1') ? 1 : 0;
+    g_remember = (k < got && buf[k] == '1') ? 1 : 0;
     break;
   }
-  gs_diag("config: RememberPartyInfo=%u", g_remember_text);
+  gs_diag("config: RememberPartyInfo=%u", g_remember);
 }
 
 static void load_settings(void) {
@@ -210,11 +215,8 @@ static void store_settings(void) {
   buf[1] = SETTINGS_VERSION;
   buf[2] = g_mode;
   buf[3] = g_difficulty;
-  // Only written when the opt-in is on; turning it off leaves the fields zeroed on the next save.
-  if (g_remember_text) {
-    gs_wcopy((WCHAR*)(buf + 4), g_name);
-    gs_wcopy((WCHAR*)(buf + 4 + FIELD_WCHARS * 2), g_password);
-  }
+  gs_wcopy((WCHAR*)(buf + 4), g_name);
+  gs_wcopy((WCHAR*)(buf + 4 + FIELD_WCHARS * 2), g_password);
 
   h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE)
@@ -277,7 +279,7 @@ static void gs_restore_text_field(BYTE* obj, int off, int line, const WCHAR* tex
   WCHAR* dup;
   void* menu;
 
-  if (!g_remember_text || !text || !text[0])
+  if (!g_remember || !text || !text[0])
     return;
   dup = gs_client_dup(text);
   if (!dup) {
@@ -312,9 +314,13 @@ static void __cdecl on_dialog_write(BYTE* obj, int after_build) {
   // does not zero -- so returning early here left difficulty holding heap garbage, which the dialog
   // could not resolve to a name and displayed as a literal "%s". Defaulting to 0 reproduces the
   // original behaviour exactly; a saved value merely overrides it.
-  mode = g_have_saved ? g_mode : 0;
+  // ⚠ Both are written on EVERY call whether or not the feature is enabled. The stores this hook
+  // replaced were the only initialisation these fields get, so skipping the write leaves heap garbage
+  // that the dialog renders as a literal "%s". Disabled simply means writing the 0 the client would
+  // have written itself.
+  mode = (g_have_saved && g_remember) ? g_mode : 0;
 #if RESTORE_DIFFICULTY
-  difficulty = g_have_saved ? g_difficulty : 0;
+  difficulty = (g_have_saved && g_remember) ? g_difficulty : 0;
 #endif
   obj[OFF_MODE] = mode;
   obj[OFF_DIFFICULTY] = difficulty;
@@ -332,7 +338,7 @@ static void __cdecl on_dialog_write(BYTE* obj, int after_build) {
 static void __cdecl on_edit_widget_created(void* widget, int is_name) {
   const WCHAR* text = is_name ? g_name : g_password;
 
-  if (!g_remember_text || !widget || !text[0])
+  if (!g_remember || !widget || !text[0])
     return;
   gs_widget_set_text(widget, text);
   gs_diag("text: prefilled the %s widget %08X", is_name ? "NAME" : "PASSWORD", (DWORD)widget);
@@ -351,9 +357,13 @@ static void __cdecl on_dialog_confirmed(BYTE* obj) {
     gs_diag("confirm: values out of range, NOT saving (offsets may be wrong)");
     return;
   }
+  if (!g_remember) {
+    gs_diag("confirm: not saving, RememberPartyInfo is off");
+    return;
+  }
   g_mode = obj[OFF_MODE];
   g_difficulty = obj[OFF_DIFFICULTY];
-  if (g_remember_text) {
+  {
     // Stored verbatim, INCLUDING the leading "\tE" language marker the client puts there. Stripping
     // it would write back a subtly malformed name that renders oddly rather than failing.
     gs_wcopy(g_name, *(const WCHAR**)(obj + OFF_NAME));
