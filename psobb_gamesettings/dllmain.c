@@ -31,6 +31,7 @@
 #include <windows.h>
 #include "util.h"
 #include "log.h"
+#include "probe.h"   // diagnostic builds only; see the question it answers
 
 // ---------------------------------------------------------------------------
 // Addresses (59NL). psobb.exe has DYNAMICBASE off and its relocations stripped,
@@ -318,6 +319,7 @@ __declspec(dllexport) void __stdcall load(void) {
     gs_log("patched ok (menubuild 0x%08X, ctor 0x%08X, label 0x%08X, confirm 0x%08X)%s",
            ADDR_MENUBUILD_CALL, ADDR_CTOR_ZERO, ADDR_MODE_LABEL_ARG, ADDR_CONFIRM_CALL,
            GAMESETTINGS_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
+    install_probe();                                     // no-op in release builds
   } else {
     // No dialog: a cosmetic feature must not interrupt every launch. But it must not be silent
     // either -- an unmatched guard means settings quietly stop being remembered, and without this
