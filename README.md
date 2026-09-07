@@ -71,6 +71,7 @@ Settings live in `widescreen.cfg`:
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
 | `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
+| `RightStickReturnSpeed` | `90` | Degrees/second the camera eases back behind you **while moving**. `0` holds the offset indefinitely. |
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
@@ -78,6 +79,13 @@ Settings live in `widescreen.cfg`:
 **Vertical look is off by default.** It works and is clamped, but stacked on the chase camera's own
 pitch the two end up solving for height at the same time and it reads oddly in play. Set
 `RightStickPitch=1` to try it.
+
+**The camera eases back behind you as you move.** A fixed offset means the camera is never behind
+the character, so the chase camera pulls one way while the offset holds the other — which reads as
+the camera misbehaving while you run. Standing still it holds, so you can look around; and steering
+always wins over the decay rather than being blended with it, since a pull that got weaker the
+further you turned would feel worse than either behaviour alone. `RightStickReturnSpeed=0` restores
+the original hold-forever behaviour.
 
 **Recentring** hangs off the client's own Camera binding (`PAD BUTTON7` in the default pad config).
 Because the offset is added on top of the chase camera, a recentre that does not also clear the

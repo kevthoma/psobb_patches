@@ -98,6 +98,8 @@
 #define XI_OFF_BUTTONS       4           // WORD
 #define XI_OFF_TRIGGER_L     6           // BYTE 0..255
 #define XI_OFF_TRIGGER_R     7           // BYTE 0..255
+#define XI_OFF_THUMB_LX      8           // left stick -- used only to tell "is the player moving"
+#define XI_OFF_THUMB_LY     10
 #define XI_OFF_THUMB_RX     12
 #define XI_OFF_THUMB_RY     14
 #define XI_TRIGGER_ON       30           // XINPUT_GAMEPAD_TRIGGER_THRESHOLD
@@ -172,6 +174,16 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 // BUTTON7, Next Page = BUTTON8 -- i.e. the shoulder triggers page through). Hence left trigger as
 // the default. A diagnostic build logs the raw button word and both triggers, so if it is wrong the
 // log names the right one and it is a config line, not a rebuild.
+// Automatic return to centre WHILE MOVING, in degrees/second. 0 holds the offset indefinitely,
+// which was the original behaviour.
+//
+// Why moving specifically: a fixed offset means the camera is never behind you, so the chase camera
+// pulls one way while the offset holds the other and the result reads as the camera "doing strange
+// things" as you run. Standing still it is fine -- and looking around while stationary is the case
+// where holding the offset is exactly what the player wants. So: decay while moving, hold while
+// still, and never decay while the player is actively steering.
+static int g_return_speed = 90;          // RightStickReturnSpeed
+
 static int g_recentre_trigger = 1;       // RightStickRecentreTrigger: 0 none, 1 LT, 2 RT, 3 either
 static int g_recentre_mask    = 0;       // RightStickRecentreMask: raw XInput wButtons bitmask
 static int g_recentre_held    = 0;       // edge detection -- fire on press, not every held frame
@@ -264,6 +276,8 @@ static void load_config(void) {
   g_invert_y    = cfg_int(buf, got, "RightStickInvertY", g_invert_y) ? 1 : 0;
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
+  g_return_speed     = cfg_int(buf, got, "RightStickReturnSpeed", g_return_speed);
+  if (g_return_speed < 0) g_return_speed = 0;
   g_recentre_trigger = cfg_int(buf, got, "RightStickRecentreTrigger", g_recentre_trigger);
   g_recentre_mask    = cfg_int(buf, got, "RightStickRecentreMask", g_recentre_mask);
 
@@ -325,6 +339,26 @@ static int f_toint(float a) {
   return r;
 }
 
+#if RSC_DIAGNOSTIC
+// atan2 via x87. FPATAN computes the angle of (st(0), st(1)) with the correct quadrant, so pushing
+// y then x gives atan2(y, x). Diagnostic-only, hence the guard -- no need to carry it in release.
+static float f_atan2(float y, float x) {
+  float r = 0.0f;
+  __asm {
+    fld   dword ptr [y]
+    fld   dword ptr [x]
+    fpatan
+    fstp  dword ptr [r]
+  }
+  return r;
+}
+
+// Previous frame's look-at point, so the periodic line can report how fast the chase camera's
+// target is actually travelling. Purely observational.
+static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
+static float g_target_move = 0.0f;
+#endif
+
 static float f_abs(float a) {
   return a < 0.0f ? -a : a;
 }
@@ -363,6 +397,7 @@ static void xinput_init(void) {
 // connected" is an explicit answer, so a missing pad can never be mistaken for a held stick.
 typedef struct {
   float rx, ry;                          // right stick, -1..1 about centre
+  float lx, ly;                          // left stick -- movement input, for auto-recentring
   WORD  buttons;                         // raw XInput wButtons
   BYTE  lt, rt;                          // triggers, 0..255
 } pad_state;
@@ -370,6 +405,8 @@ typedef struct {
 static void decode_pad(const BYTE* st, pad_state* p) {
   p->rx      = (float)(*(short*)(st + XI_OFF_THUMB_RX)) / XI_THUMB_SCALE;
   p->ry      = (float)(*(short*)(st + XI_OFF_THUMB_RY)) / XI_THUMB_SCALE;
+  p->lx      = (float)(*(short*)(st + XI_OFF_THUMB_LX)) / XI_THUMB_SCALE;
+  p->ly      = (float)(*(short*)(st + XI_OFF_THUMB_LY)) / XI_THUMB_SCALE;
   p->buttons = *(WORD*)(st + XI_OFF_BUTTONS);
   p->lt      = st[XI_OFF_TRIGGER_L];
   p->rt      = st[XI_OFF_TRIGGER_R];
@@ -379,7 +416,7 @@ static int read_pad(pad_state* p) {
   BYTE st[XI_STATE_BYTES];
   DWORD i;
 
-  p->rx = p->ry = 0.0f;
+  p->rx = p->ry = p->lx = p->ly = 0.0f;
   p->buttons = 0;
   p->lt = p->rt = 0;
   if (!g_xinput_get_state)
@@ -408,6 +445,27 @@ static int read_pad(pad_state* p) {
   }
   g_xi_rescan = XI_RESCAN_FRAMES;
   return 0;
+}
+
+// How hard the LEFT stick is pushed, 0..1, deadzone removed. This is the "is the player moving"
+// signal. Using the movement INPUT rather than the character's world velocity keeps it honest when
+// the character is blocked by a wall or staggered -- the player is still asking to move, and that
+// is when they want the camera back behind them.
+static float move_magnitude(const pad_state* p) {
+  float dz = (float)g_deadzone / 100.0f;
+  float m = f_sqrt(p->lx * p->lx + p->ly * p->ly);
+
+  if (m > 1.0f) m = 1.0f;
+  if (m <= dz)
+    return 0.0f;
+  return (m - dz) / (1.0f - dz);
+}
+
+// Move `v` toward zero by at most `step`, landing exactly on zero rather than creeping.
+static float decay_toward_zero(float v, float step) {
+  if (v > step)  return v - step;
+  if (v < -step) return v + step;
+  return 0.0f;
 }
 
 // Is the recentre control down this frame?
@@ -470,20 +528,39 @@ static void __cdecl on_camera_updated(void) {
   // offset at zero and make the stick appear dead.
   recentre = have_pad && recentre_down(&pad);
   if (recentre && !g_recentre_held) {
+    // Logged on the EDGE, not sampled: a press lasts a few frames, so the periodic line below will
+    // essentially never catch one. This is what confirms which control is actually bound.
+    rsc_diag("recentre fired (btn=%04X lt=%d rt=%d) -- cleared yaw=%d/1000 pitch=%d/1000",
+             pad.buttons, pad.lt, pad.rt,
+             f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f));
     g_yaw_offset = 0.0f;
     g_pitch_offset = 0.0f;
   }
   g_recentre_held = recentre;
 
 #if RSC_DIAGNOSTIC
+  {
+    // Track the look-at point every frame, not every sampled frame, or the reported speed would be
+    // a distance over 300 frames rather than one.
+    float mx = tgt->x - g_prev_target.x;
+    float my = tgt->y - g_prev_target.y;
+    float mz = tgt->z - g_prev_target.z;
+    g_target_move = f_sqrt(mx * mx + my * my + mz * mz);
+    g_prev_target = *tgt;
+  }
   if ((g_frames % RSC_DIAG_EVERY) == 0) {
-    // Whether a pad is seen at all, what it reads, and the live menu mask -- the three things that
-    // distinguish "not connected" from "connected but suppressed" from "working".
-    rsc_diag("xinput slot=%d connected=%d rx=%d/1000 ry=%d/1000 btn=%04X lt=%d rt=%d "
-             "recentre=%d | menuflags=%08X | yaw=%d/1000 pitch=%d/1000",
+    // Left half: is a pad seen, what does it read, is the state suppressed. Right half: what the
+    // CHASE CAMERA itself is doing before we touch it -- its own yaw, how far back it is sitting,
+    // and how fast its target is moving. If the camera still misbehaves, the cause is far more
+    // likely to be visible in those three than in our offset.
+    float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
+    float dist = f_sqrt(ax * ax + ay * ay + az * az);
+    rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
+             "menuflags=%08X | yaw=%d/1000 pitch=%d/1000 | auto: yaw=%d/1000 dist=%d tgtspeed=%d",
              g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
-             pad.buttons, pad.lt, pad.rt, recentre,
-             flags, f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f));
+             f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
+             flags, f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f),
+             f_toint(f_atan2(ax, az) * 1000.0f), f_toint(dist), f_toint(g_target_move * 100.0f));
   }
 #endif
 
@@ -502,17 +579,34 @@ static void __cdecl on_camera_updated(void) {
     // Negated after the first in-game session: pushing the stick right must swing the view right,
     // and the unnegated sense read backwards. RightStickInvertX now means "the other way from the
     // one that felt natural", which is what an invert switch should mean.
-    dyaw = shape_axis(-pad.rx, g_invert_x) * rate;
+    float steer_x = shape_axis(-pad.rx, g_invert_x);
+    // XInput's Y is positive-UP, and a positive pitch here RAISES the eye (i.e. looks further
+    // down). Negating makes stick-forward look up, which is the un-inverted convention;
+    // RightStickInvertY then means what its name says.
+    float steer_y = g_allow_pitch ? shape_axis(-pad.ry, g_invert_y) : 0.0f;
+
+    dyaw = steer_x * rate;
     g_yaw_offset = wrap_angle(g_yaw_offset + dyaw);
 
     if (g_allow_pitch) {
-      // XInput's Y is positive-UP, and a positive pitch here RAISES the eye (i.e. looks further
-      // down). Negating makes stick-forward look up, which is the un-inverted convention;
-      // RightStickInvertY then means what its name says.
-      dpitch = shape_axis(-pad.ry, g_invert_y) * rate;
+      dpitch = steer_y * rate;
       g_pitch_offset += dpitch;
       if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
       if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
+    }
+
+    // Ease back behind the character while the player is moving and NOT steering. Steering wins
+    // outright rather than being blended against: a decay that fought live input would make the
+    // stick feel like it had a weaker pull the further you turned, which is worse than either
+    // behaviour on its own.
+    if (g_return_speed > 0) {
+      float move = move_magnitude(&pad);
+      float step = (float)g_return_speed * DEG2RAD / 30.0f * move;   // deg/s -> rad/frame at 30fps
+
+      if (move > 0.0f) {
+        if (steer_x == 0.0f) g_yaw_offset = decay_toward_zero(g_yaw_offset, step);
+        if (steer_y == 0.0f) g_pitch_offset = decay_toward_zero(g_pitch_offset, step);
+      }
     }
   }
 
@@ -622,9 +716,9 @@ __declspec(dllexport) void __stdcall load(void) {
 
   if (patch_camera()) {
     rsc_log("patched ok (call %08X -> hook) sens=%d%% deadzone=%d%% pitch=%s invX=%d invY=%d "
-            "recentre(trig=%d mask=%04X) suppress=%03X xinput=%s%s",
+            "return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X xinput=%s%s",
             ADDR_UPDATE_CALL, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_recentre_trigger, g_recentre_mask, g_suppress,
+            g_invert_x, g_invert_y, g_return_speed, g_recentre_trigger, g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
