@@ -401,7 +401,8 @@ namespace Corellia
         // The dropdown position is no longer the mode index, because Fullscreen is not offered --
         // see BuildModeList. Never index DisplayModeKeys with cboMode.SelectedIndex directly.
         readonly List<int> offeredModes = new List<int>();
-        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin;
+        CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin,
+                 cbRememberParty;
         TrackBar tbMaster, tbMusic, tbEffects;
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
@@ -566,7 +567,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 604);
+            ClientSize = new Size(430, 628);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -636,7 +637,14 @@ namespace Corellia
             cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 514), AutoSize = true };
             Controls.Add(cbSaveLogin);
 
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 544), Size = new Size(130, 44) };
+            // Remember the create-game party name and password. OFF by default: the password is a
+            // secret at rest, and a restore that goes wrong changes who can join a game. Opt-in
+            // matches what Ephinea does with the same feature.
+            cbRememberParty = new CheckBox { Text = "Remember party name and password",
+                                             Location = new Point(24, 538), AutoSize = true };
+            Controls.Add(cbRememberParty);
+
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 568), Size = new Size(130, 44) };
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -761,6 +769,7 @@ namespace Corellia
 
             cbController.Checked = AsBool(d, "ControllerPrompts", true);
             cbSaveLogin.Checked = ReadSaveLogin();
+            cbRememberParty.Checked = AsBool(d, "RememberPartyInfo", false);
 
             // Default to the desktop size rather than a fixed one: it is the only size guaranteed
             // to be a real display mode on this machine.
@@ -836,6 +845,7 @@ namespace Corellia
             SetKey(lines, "SceneSharpen", cbSceneSharpen.Checked ? "1" : "0");
             SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.25");
             SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
+            SetKey(lines, "RememberPartyInfo", cbRememberParty.Checked ? "1" : "0");
             SetKey(lines, "MasterVolume", tbMaster.Value.ToString());
             SetKey(lines, "MusicVolume", tbMusic.Value.ToString());
             SetKey(lines, "EffectVolume", tbEffects.Value.ToString());

@@ -31,7 +31,6 @@
 #include <windows.h>
 #include "util.h"
 #include "log.h"
-#include "probe.h"   // diagnostic builds only; see the question it answers
 
 // ---------------------------------------------------------------------------
 // Addresses (59NL). psobb.exe has DYNAMICBASE off and its relocations stripped,
@@ -63,14 +62,35 @@
 // while leaving mode (which has no gating) working.
 #define RESTORE_DIFFICULTY  1
 
+// Text fields. Settled in game 2026-09-07 (see notes/psobb-client-map.md): creation site B builds
+// the NAME widget (maxlen 0x0E, stores to +0x24) and site A the PASSWORD (maxlen 0x10, +0x28).
+// 14 + the two-char "\tE" language marker is exactly the 16-wchar wire field.
+#define OFF_NAME            0x24         // wchar_t*, FREED by the destructor -- see ADDR_CLIENT_MALLOC
+#define OFF_PASSWORD        0x28         // wchar_t*, likewise
+#define OFF_EDIT_WIDGET     0x34         // the text-entry widget, created on demand and destroyed after
+#define FIELD_WCHARS        16           // pstring<UTF16,0x10>, matching C_CreateGame_BB_C1
+
+#define ADDR_CREATE_NAME    0x0073432D   // mov eax,[ebp-0x14]; mov [eax+0x34],edx  (name widget)
+#define ADDR_CREATE_PW      0x00734213   // same two instructions                   (password widget)
+#define ADDR_WIDGET_SETTEXT 0x0078ED74   // __thiscall(ecx = widget, wchar_t*), CALLEE cleans
+#define ADDR_SET_LINE_TEXT  0x00738A40   // __thiscall(ecx = menu widget at +0x2C), (string, line)
+#define ADDR_CLIENT_MALLOC  0x008581C5   // __cdecl. MUST be this one: the dialog destructor frees
+                                         // +0x24/+0x28, so a static buffer would corrupt the heap.
+#define OFF_MENU_WIDGET     0x2C         // the menu whose lines the summary text belongs to
+#define LINE_PARTY_NAME     0
+#define LINE_PASSWORD       1
+
 #define SETTINGS_FILE       "corellia_gamesettings.dat"
 #define SETTINGS_MAGIC      0xC0
-#define SETTINGS_VERSION    0x01
+#define SETTINGS_VERSION    0x02         // v1 was mode+difficulty only; v1 files still load
 
-// Cached across the two hooks. Written by the confirm hook, read by the constructor hook.
-static BYTE g_mode = 0;
-static BYTE g_difficulty = 0;
-static BYTE g_have_saved = 0;
+// Cached across the hooks. Written by the confirm hook, read by the construct-time hooks.
+static BYTE  g_mode = 0;
+static BYTE  g_difficulty = 0;
+static BYTE  g_have_saved = 0;
+static WCHAR g_name[FIELD_WCHARS];
+static WCHAR g_password[FIELD_WCHARS];
+static BYTE  g_remember_text = 0;        // the launcher's RememberPartyInfo, OFF unless enabled
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -82,10 +102,55 @@ static BYTE g_have_saved = 0;
 //
 // Win32 only, no CRT: these plugins link without one (see util.h re-implementing memset).
 // ---------------------------------------------------------------------------
+// The launcher writes RememberPartyInfo into widescreen.cfg beside psobb.exe. Absent or 0 means the
+// text fields are neither captured nor restored -- the password is a secret at rest, and a restore
+// that goes wrong changes who can join a game, so this defaults OFF and stays off until asked for.
+static void load_remember_flag(void) {
+  char path[MAX_PATH];
+  HANDLE h;
+  char buf[8192];
+  DWORD got = 0, i;
+  const char* key = "RememberPartyInfo";
+
+  g_remember_text = 0;
+  if (!gs_sibling_path(path, MAX_PATH, "widescreen.cfg"))
+    return;
+  h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                  FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE)
+    return;
+  if (ReadFile(h, buf, sizeof(buf) - 1, &got, NULL))
+    buf[got] = 0;
+  else
+    got = 0;
+  CloseHandle(h);
+
+  for (i = 0; i < got; i++) {
+    DWORD k = 0;
+
+    // Only match at the start of a line, so a longer key ending in this name cannot match.
+    if (i && buf[i - 1] != '\n' && buf[i - 1] != '\r')
+      continue;
+    while (key[k] && (i + k) < got && buf[i + k] == key[k]) k++;
+    if (key[k])
+      continue;                              // ran out of match before the end of the key
+
+    k += i;
+    while (k < got && (buf[k] == ' ' || buf[k] == '\t')) k++;
+    if (k >= got || buf[k] != '=')
+      continue;                              // the name, but not as a key
+    k++;
+    while (k < got && (buf[k] == ' ' || buf[k] == '\t')) k++;
+    g_remember_text = (k < got && buf[k] == '1') ? 1 : 0;
+    break;
+  }
+  gs_diag("config: RememberPartyInfo=%u", g_remember_text);
+}
+
 static void load_settings(void) {
   char path[MAX_PATH];
   HANDLE h;
-  BYTE buf[4];
+  BYTE buf[4 + FIELD_WCHARS * 4];
   DWORD got = 0;
 
   if (!gs_sibling_path(path, MAX_PATH, SETTINGS_FILE))
@@ -95,13 +160,20 @@ static void load_settings(void) {
                   FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE)
     return;                                  // first run: nothing saved yet, which is not an error
-  if (ReadFile(h, buf, sizeof(buf), &got, NULL) && got == sizeof(buf) &&
-      buf[0] == SETTINGS_MAGIC && buf[1] == SETTINGS_VERSION &&
+  if (ReadFile(h, buf, sizeof(buf), &got, NULL) && got >= 4 &&
+      buf[0] == SETTINGS_MAGIC && buf[1] <= SETTINGS_VERSION &&
       buf[2] <= 3 && buf[3] <= 3) {          // validate: a corrupt file must not select a bogus mode
     g_mode = buf[2];
     g_difficulty = buf[3];
     g_have_saved = 1;
-    gs_diag("load: mode=%u difficulty=%u", g_mode, g_difficulty);
+    // v1 files hold only mode and difficulty; read them and leave the text empty rather than
+    // rejecting a file written by an older build.
+    if (buf[1] >= 2 && got >= sizeof(buf)) {
+      gs_wcopy(g_name, (const WCHAR*)(buf + 4));
+      gs_wcopy(g_password, (const WCHAR*)(buf + 4 + FIELD_WCHARS * 2));
+    }
+    gs_diag("load: v%u mode=%u difficulty=%u name=%d chars password=%d chars",
+            buf[1], g_mode, g_difficulty, gs_wlen(g_name), gs_wlen(g_password));
   } else {
     gs_diag("load: settings file present but rejected (got %u bytes)", got);
   }
@@ -111,22 +183,112 @@ static void load_settings(void) {
 static void store_settings(void) {
   char path[MAX_PATH];
   HANDLE h;
-  BYTE buf[4];
+  BYTE buf[4 + FIELD_WCHARS * 4];
   DWORD put = 0;
+  int i;
 
   if (!gs_sibling_path(path, MAX_PATH, SETTINGS_FILE))
     return;
 
+  for (i = 0; i < (int)sizeof(buf); i++) buf[i] = 0;
   buf[0] = SETTINGS_MAGIC;
   buf[1] = SETTINGS_VERSION;
   buf[2] = g_mode;
   buf[3] = g_difficulty;
+  // Only written when the opt-in is on; turning it off leaves the fields zeroed on the next save.
+  if (g_remember_text) {
+    gs_wcopy((WCHAR*)(buf + 4), g_name);
+    gs_wcopy((WCHAR*)(buf + 4 + FIELD_WCHARS * 2), g_password);
+  }
 
   h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE)
     return;                                  // a read-only install dir just means it never persists
   WriteFile(h, buf, sizeof(buf), &put, NULL);
   CloseHandle(h);
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers -- no CRT is linked, so these are hand-rolled
+// ---------------------------------------------------------------------------
+static int gs_wlen(const WCHAR* w) {
+  int n = 0;
+  while (w && w[n] && n < 0x400) n++;
+  return n;
+}
+
+// Copy at most FIELD_WCHARS-1 and always terminate. The wire field is 16 wide chars and the client
+// truncates rather than overflows, so refusing to store more than fits keeps the two consistent.
+static void gs_wcopy(WCHAR* dst, const WCHAR* src) {
+  int i = 0;
+  if (!src) { dst[0] = 0; return; }
+  for (; i < FIELD_WCHARS - 1 && src[i]; i++) dst[i] = src[i];
+  dst[i] = 0;
+}
+
+// A copy of `text` on the CLIENT's heap. The dialog destructor frees +0x24/+0x28, so anything stored
+// there has to come from the allocator that free() expects. Returns NULL if there is nothing to store.
+static WCHAR* gs_client_dup(const WCHAR* text) {
+  int n = gs_wlen(text);
+  DWORD bytes;
+  void* p = NULL;
+  int i;
+
+  if (n <= 0)
+    return NULL;
+  bytes = (DWORD)((n + 1) * 2);
+  __asm {
+    push bytes
+    mov  eax, ADDR_CLIENT_MALLOC
+    call eax
+    add  esp, 4                                          // __cdecl: we clean
+    mov  p, eax
+  }
+  if (!p)
+    return NULL;
+  for (i = 0; i < n; i++) ((WCHAR*)p)[i] = text[i];
+  ((WCHAR*)p)[n] = 0;
+  return (WCHAR*)p;
+}
+
+static void gs_widget_set_text(void* widget, const WCHAR* text) {
+  __asm {
+    push text
+    mov  ecx, widget
+    mov  eax, ADDR_WIDGET_SETTEXT
+    call eax                                             // callee cleans its one argument
+  }
+}
+
+static void gs_set_line_text(void* menu, void* text, int line) {
+  __asm {
+    push line
+    push text
+    mov  ecx, menu
+    mov  eax, ADDR_SET_LINE_TEXT
+    call eax                                             // callee cleans both
+  }
+}
+
+// Put a remembered field back: the pointer the confirm path will read, and the summary line the
+// player sees. Both, or neither -- a value that is sent but not shown is the failure this plugin
+// already hit once with Play Mode.
+static void gs_restore_text_field(BYTE* obj, int off, int line, const WCHAR* text) {
+  WCHAR* dup;
+  void* menu;
+
+  if (!g_remember_text || !text || !text[0])
+    return;
+  dup = gs_client_dup(text);
+  if (!dup) {
+    gs_diag("text: allocation failed for +0x%02X", off);
+    return;
+  }
+  *(WCHAR**)(obj + off) = dup;
+  menu = *(void**)(obj + OFF_MENU_WIDGET);
+  if (menu)
+    gs_set_line_text(menu, dup, line);
+  gs_diag("text: restored +0x%02X (%d chars) and line %d", off, gs_wlen(dup), line);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +320,22 @@ static void __cdecl on_dialog_write(BYTE* obj, int after_build) {
   obj[OFF_DIFFICULTY] = difficulty;
   gs_diag("write: now mode=%u difficulty=%u (saved=%u, difficulty restore %s)",
           obj[OFF_MODE], obj[OFF_DIFFICULTY], g_have_saved, RESTORE_DIFFICULTY ? "on" : "OFF");
-  (void)after_build;
+  if (after_build) {
+    // +0x2C exists by now (set at 0x00733F87), and the constructor has not yet touched lines 0/1.
+    gs_restore_text_field(obj, OFF_NAME, LINE_PARTY_NAME, g_name);
+    gs_restore_text_field(obj, OFF_PASSWORD, LINE_PASSWORD, g_password);
+  }
+}
+
+// Called as each text-entry widget is created, so the box opens holding the remembered value rather
+// than blank -- otherwise opening a field just to look at it would clear it.
+static void __cdecl on_edit_widget_created(void* widget, int is_name) {
+  const WCHAR* text = is_name ? g_name : g_password;
+
+  if (!g_remember_text || !widget || !text[0])
+    return;
+  gs_widget_set_text(widget, text);
+  gs_diag("text: prefilled the %s widget %08X", is_name ? "NAME" : "PASSWORD", (DWORD)widget);
 }
 
 static void __cdecl on_dialog_confirmed(BYTE* obj) {
@@ -176,6 +353,14 @@ static void __cdecl on_dialog_confirmed(BYTE* obj) {
   }
   g_mode = obj[OFF_MODE];
   g_difficulty = obj[OFF_DIFFICULTY];
+  if (g_remember_text) {
+    // Stored verbatim, INCLUDING the leading "\tE" language marker the client puts there. Stripping
+    // it would write back a subtly malformed name that renders oddly rather than failing.
+    gs_wcopy(g_name, *(const WCHAR**)(obj + OFF_NAME));
+    gs_wcopy(g_password, *(const WCHAR**)(obj + OFF_PASSWORD));
+    gs_diag("confirm: captured name=%d chars password=%d chars",
+            gs_wlen(g_name), gs_wlen(g_password));
+  }
   g_have_saved = 1;
   store_settings();
 }
@@ -183,6 +368,37 @@ static void __cdecl on_dialog_confirmed(BYTE* obj) {
 // ---------------------------------------------------------------------------
 // Naked stubs
 // ---------------------------------------------------------------------------
+
+// Each fires as its text-entry widget is created, reproducing the two instructions it replaces.
+// ebp is the caller's frame and a naked callee leaves it alone, so the reproduced pair sees exactly
+// what it would have.
+void __declspec(naked) nameWidgetHook(void) {
+  __asm {
+    pushad
+    push 1
+    push edx
+    call on_edit_widget_created
+    add  esp, 8
+    popad
+    mov  eax, dword ptr [ebp - 0x14]
+    mov  dword ptr [eax + OFF_EDIT_WIDGET], edx
+    ret
+  }
+}
+
+void __declspec(naked) passwordWidgetHook(void) {
+  __asm {
+    pushad
+    push 0
+    push edx
+    call on_edit_widget_created
+    add  esp, 8
+    popad
+    mov  eax, dword ptr [ebp - 0x14]
+    mov  dword ptr [eax + OFF_EDIT_WIDGET], edx
+    ret
+  }
+}
 
 // Supplies the Play Mode summary label's argument, replacing the constructor's hardcoded zero.
 // edx = the dialog object here; 0x00734079 wants the mode in AL and returns the string in EAX, so
@@ -253,6 +469,22 @@ void __declspec(naked) saveHook(void) {
 // no other plugin in this repo unprotects either. If that ever changes, every plugin here breaks
 // together and loudly, not just this one.
 // ---------------------------------------------------------------------------
+// The six bytes both creation sites share: 8b 45 ec 89 50 34
+static BOOL is_widget_store(ULONG_PTR at) {
+  static const BYTE want[6] = { 0x8B, 0x45, 0xEC, 0x89, 0x50, 0x34 };
+  int i;
+  for (i = 0; i < 6; i++)
+    if (*(BYTE*)(at + i) != want[i])
+      return FALSE;
+  return TRUE;
+}
+
+static void patch_widget_store(ULONG_PTR at, void* stub) {
+  *(BYTE*)at = 0xE8;
+  *(DWORD*)(at + 1) = calc_disp32(at + 1, (ULONG_PTR)stub);
+  *(BYTE*)(at + 5) = 0x90;
+}
+
 static BOOL patch_gamesettings(void) {
   DWORD confirm_target;
   DWORD menubuild_target;
@@ -273,6 +505,9 @@ static BOOL patch_gamesettings(void) {
     return FALSE;
   menubuild_target = (DWORD)(ADDR_MENUBUILD_CALL + 5 + *(LONG*)(ADDR_MENUBUILD_CALL + 1));
   if (menubuild_target != ADDR_MENUBUILD)
+    return FALSE;
+
+  if (!is_widget_store(ADDR_CREATE_NAME) || !is_widget_store(ADDR_CREATE_PW))
     return FALSE;
 
   if (*(WORD*)ADDR_MODE_LABEL_ARG != 0xC033 ||           // xor eax, eax
@@ -299,6 +534,11 @@ static BOOL patch_gamesettings(void) {
   *(BYTE*)(ADDR_MODE_LABEL_ARG + 5) = 0x90;
   *(BYTE*)(ADDR_MODE_LABEL_ARG + 6) = 0x90;
 
+  // Text-entry widgets: prefill each as it is created, so opening a field to look at it does not
+  // clear it.
+  patch_widget_store(ADDR_CREATE_NAME, nameWidgetHook);
+  patch_widget_store(ADDR_CREATE_PW, passwordWidgetHook);
+
   // Confirm path: retarget the existing call to us; we tail-jump to where it went.
   *(DWORD*)(ADDR_CONFIRM_CALL + 1) = calc_disp32(ADDR_CONFIRM_CALL + 1, (ULONG_PTR)saveHook);
 
@@ -313,13 +553,13 @@ __declspec(dllexport) void __stdcall load(void) {
     return;
   }
 
+  load_remember_flag();
   load_settings();
 
   if (patch_gamesettings()) {
     gs_log("patched ok (menubuild 0x%08X, ctor 0x%08X, label 0x%08X, confirm 0x%08X)%s",
            ADDR_MENUBUILD_CALL, ADDR_CTOR_ZERO, ADDR_MODE_LABEL_ARG, ADDR_CONFIRM_CALL,
            GAMESETTINGS_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
-    install_probe();                                     // no-op in release builds
   } else {
     // No dialog: a cosmetic feature must not interrupt every launch. But it must not be silent
     // either -- an unmatched guard means settings quietly stop being remembered, and without this
