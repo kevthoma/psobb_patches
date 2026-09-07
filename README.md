@@ -54,3 +54,24 @@ Adjusts the color range of the scene to darken blacks and brighten whites, to mo
 Increases the asset size limit from 0.59MB to 100MB. Allows loading large custom assets such as high definition texture packs and custom maps.
 
 Credits to [Solybum](https://github.com/Solybum) for the patch.
+
+## RightStickCamera
+Adds right-stick camera control. Base PSO has no free camera — the right stick only navigates menus and the pad config's "Camera" binding is re-centre — so this is a camera being built, not a binding being exposed.
+
+It does **not** rotate the view matrix. The client already has a full third-person follow camera with its own smoothing and map-geometry collision; this plugin hooks one call inside that camera's per-frame update and rotates the eye point the auto-camera just chose, about the point it is looking at. Everything downstream is derived from those two points, so the wall collision, the smoothing, the minimap heading, sprite billboarding, and camera-relative movement and lock-on all follow with no extra work.
+
+The rotation is an *offset* on top of the auto-camera, which keeps full control of distance and height. It re-centres itself in cutscenes and wherever the client snaps the camera on its own.
+
+Settings live in `widescreen.cfg`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `RightStickCamera` | `1` | Master on/off. |
+| `RightStickSensitivity` | `100` | Percent. 100 = 90°/second at full deflection. |
+| `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
+| `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
+| `RightStickPitch` | `1` | Allow vertical look. `0` leaves height entirely to the game. |
+| `RightStickAxisYaw` / `RightStickAxisPitch` | `0x14` / `0x08` | `DIJOYSTATE2` axis offsets — see below. |
+| `RightStickSuppressMask` | `0x82C` | Menu-state bits that mean "leave the camera alone". |
+
+The last two rows exist because two things cannot be determined by reading the binary: which axes the pad lands on (ours is Xidi's virtual device, not the physical controller) and exactly which menu states should suppress the camera. The defaults are the documented ones; a diagnostic build logs all six axes and the live menu mask to `corellia_rightstickcamera.log`, which settles both in one session.

@@ -574,6 +574,89 @@ The absence of an `add esp,N` after the game's own calls is what identifies call
 Whether restoring a difficulty the character has not unlocked is re-clamped by the dialog. The level
 gate was never located. `RESTORE_DIFFICULTY` in the plugin exists to turn that half off.
 
+## Camera — MAPPED AND HOOKED (2026-09-07)
+
+The client has a complete third-person follow camera. Everything below was **navigated to** with the
+psobb.io decompilation and then **re-derived from our own `psobb.exe`** — see the provenance rule at
+the end of this file.
+
+### The state struct
+
+Global pointer **`0x00A48A54`** → `0x1D4` bytes (`allocate_in_main_arena(0x1d4)`).
+
+| Offset | Field |
+|---|---|
+| `+0x94`  | copy of `y_rotation`, written at the end of each update |
+| `+0x178` | `camera_source` — current eye |
+| `+0x184` | `camera_target` — current look-at |
+| `+0x190` / `+0x194` / `+0x198` | x / **y** / z rotation, PSO angle units (`0x10000` = 360°) |
+| `+0x19C` | FOV, passed to the projection setup |
+| `+0x1A0` | **`camera_desired_source`** |
+| `+0x1AC` | **`camera_desired_target`** |
+| `+0x1B8` / `+0x1BC` | source / target lerp factors |
+| `+0x1C0` / `+0x1C4` | shake frame counter / scaling |
+| `+0x1C8` | `desired_source_copy`, the "from" end of the collision ray |
+
+⚠ **`y_rotation` (+0x194) is an OUTPUT.** `apply_camera_angle_rotations` (`0x004D6448`) derives it
+from the source→target vector every frame. Writing it does nothing useful — it is a cached yaw that
+the rest of the engine *consumes*: every billboarded sprite (`matrix_rotation_y`) and the **minimap
+heading**, which is `0x8000 - y_rotation`.
+
+➡ That last one is a free on-screen oracle: **if the minimap needle turns, the real camera moved.**
+
+### Per-frame update, and the one hook site
+
+`UpdateDefaultNPCCameraState` @ `0x004D3ABC` (`__fastcall`, state in `ecx`, kept in `esi`):
+
+```
+004D3B10  8B CD              mov ecx, ebp
+004D3B12  E8 DD E4 FF FF     call 0x004D1FF4   ; auto-camera writes desired_source/target
+004D3B17                     <-- hook point: points are fresh, nothing has read them yet
+          ...  0x004D3BA8 collision ray  ->  0x004D3C98 / 0x004D3D14 / 0x004D3E90 lerp or snap
+          ->  0x004D3D6C source-vs-geometry  ->  0x004D3DF4 shake  ->  0x0082EBC8 projection
+```
+
+`0x004D1FF4` writes `[0x00A48A54]+0x1A0..+0x1B4` directly — which is what pins both the global and the
+desired-point offsets, independent of the decompilation.
+
+**Therefore the way to drive this camera is to rotate `camera_desired_source` about
+`camera_desired_target` at `0x004D3B17`.** Smoothing, wall collision, `y_rotation`, the minimap,
+billboarding and camera-relative movement/lock-on are all *derived* from those two points and follow
+for free. Built as `psobb_rightstickcamera`.
+
+⛔ **Do not build a camera by rotating the view matrix in the d3d8 wrapper.** It is visual only:
+movement is camera-relative and lock-on is defined in terms of camera direction, so the game would
+still believe the camera never moved and the character would walk somewhere other than where the
+player is looking. This was the plan of record until the struct above was found; it is now a dead end.
+
+Y is the vertical axis: the degenerate case in the view-matrix path (`0x004D2158`) is "X and Z deltas
+are both zero", which it treats as looking straight up or down and nudges out of.
+
+### Input
+
+`g_joyState` — a whole `DIJOYSTATE2` (`0x110` bytes) @ **`0x00ADCC80`**. `PollJoystickState`
+(`0x00842460`) calls `GetDeviceState(0x110, buf)` on `g_pDevice[0]` (`0x00ADC9BC`) and `rep movsd`s
+the result there, so reading it costs nothing and cannot disagree with what the game itself saw.
+The client's own frame-delta threshold is `4096.0f` @ `0x0098B350` (12.5% of a signed-16-bit axis).
+
+⚠ The client calls `SetCooperativeLevel(DISCL_EXCLUSIVE | DISCL_BACKGROUND)` — it owns the pad even
+unfocused, which is why other gamepad-aware apps lose it while PSO runs. Read `g_joyState`; do not
+open a second device.
+
+### Still unverified
+
+Two things that reading the binary cannot settle, both left configurable rather than compiled in:
+
+1. **Which axes carry the right stick.** The device is Xidi's virtual pad
+   (`Mapper Type = StandardGamepad`), not the physical controller. The psobb.io input notes say
+   `lZ` (+0x08) is the right stick's vertical and `lRz` (+0x14) its horizontal; that is the default.
+2. **Which `g_GenericMenuSubSelection` (`0x00A489FC`) bits mean "leave the camera alone."** `0x0C`
+   selects the snap branch inside `0x004D1FF4`; `0x820` is the mask the update itself tests to skip
+   collision and smoothing. Suppressing on `0x82C` is the conservative reading, not an observation.
+
+A diagnostic build of the plugin logs all six axes and the live mask, which answers both in one
+session.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,
@@ -594,7 +677,14 @@ identified `SetRenderTarget+0x68` reading `[NULL+8]` precisely.
 **Using the wrapper as an oracle.** We compile the d3d8 wrapper, and every `SetTransform` the game issues
 passes through our code — including the view and projection matrices. For anything camera-related this
 turns a blind memory scan into a targeted one: compute the true camera yaw from the view matrix each
-frame, then look for the address whose value tracks it. Not yet built.
+frame, then look for the address whose value tracks it. Never built, and **not needed for the camera** —
+the struct was found by reading instead (see "Camera" above). Still the right technique for the next
+continuously-changing value that has no name.
+
+**Re-check an old plan against assets acquired after it was written.** The right-stick camera sat on the
+board for weeks as "highest risk, may stall", with a bounded memory-scan spike defined to decide whether
+to abandon it. The plan predated the psobb.io decompilation. Reading that instead answered the whole
+question in one session, and the spike was never run.
 
 **Anchoring on a known wire format.** For the create-game dialog, the C1 packet's `0x50`-byte layout is
 known exactly, so the code that *builds* C1 is findable, and the struct holding the dialog's live
@@ -605,7 +695,6 @@ selections is upstream of it. Better than searching for the UI directly.
 | Goal | Anchor | Notes |
 |---|---|---|
 | Remembered game-creation settings | **DONE — mode + difficulty, confirmed in game 2026-09-07** (`psobb_gamesettings`). See the create-game dialog section for the four patch sites and the three-display-paths trap. Party Name / Password are mapped but not built. | Persist per install directory rather than per registry leaf — each instance is its own install, so a file beside the client is correctly scoped without having to detect which leaf this build owns. |
-| Right-stick camera | View matrix via our `SetTransform` | Easier to *find* than the above (a continuously-changing value can be correlated) but far more work after: the auto-camera overwrites each frame, plus collision and lock-on. |
 | Inventory past 30 | `PlayerInventory` at offset 0 | Protocol side understood; the client-side wall is the 30-slot inventory UI, which has no paging. |
 | In-game volume control | `dsound.dll` proxy (single import: ordinal #1 `DirectSoundCreate`) | No game RE needed — wrap `CreateSoundBuffer` and scale per buffer. Verify the streaming-vs-static split before promising separate BGM/SE. See the sound survey above. |
 | Post-quest exit in One Person | — | **No anchor yet.** Confirmed the client sends `0x98` Leave game ~2s after the quest's success handler `ret`s; the trigger is in the client and unlocated. Quest scripts and server are ruled out. |
