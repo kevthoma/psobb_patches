@@ -182,7 +182,11 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 // things" as you run. Standing still it is fine -- and looking around while stationary is the case
 // where holding the offset is exactly what the player wants. So: decay while moving, hold while
 // still, and never decay while the player is actively steering.
-static int g_return_speed = 90;          // RightStickReturnSpeed
+// ⚠ OFF by default. Tried at 90 deg/s and it is actively harmful in combat: the whole point of a
+// right-stick camera is to aim the view with one thumb while positioning the character with the
+// other, and a decay fights both the player and the chase camera to undo exactly that. Kept only
+// because someone may want a camera that drifts back on its own.
+static int g_return_speed = 0;           // RightStickReturnSpeed, degrees/second
 
 static int g_recentre_trigger = 1;       // RightStickRecentreTrigger: 0 none, 1 LT, 2 RT, 3 either
 static int g_recentre_mask    = 0;       // RightStickRecentreMask: raw XInput wButtons bitmask
@@ -197,7 +201,11 @@ static DWORD g_xi_rescan = 0;            // frames left before scanning slots ag
 // Accumulated offset from wherever the auto-camera would have put the eye. Persisted only in
 // memory: a camera angle is not worth a file, and starting each session centred is the behaviour
 // players already expect from the game.
-static float g_yaw_offset = 0.0f;        // radians
+// ⭐ The camera yaw we are HOLDING, as an absolute world angle -- not an offset from the chase
+// camera. g_have_yaw says whether we are holding one at all; while it is 0 the chase camera is left
+// completely untouched, so a player who never uses the right stick gets stock behaviour.
+static float g_camera_yaw = 0.0f;        // radians, absolute
+static int   g_have_yaw   = 0;
 static float g_pitch_offset = 0.0f;      // radians
 static DWORD g_frames = 0;
 
@@ -339,9 +347,9 @@ static int f_toint(float a) {
   return r;
 }
 
-#if RSC_DIAGNOSTIC
 // atan2 via x87. FPATAN computes the angle of (st(0), st(1)) with the correct quadrant, so pushing
-// y then x gives atan2(y, x). Diagnostic-only, hence the guard -- no need to carry it in release.
+// y then x gives atan2(y, x). Needed in every build now that the camera holds an ABSOLUTE yaw: each
+// frame we have to know what angle the chase camera just chose in order to cancel it.
 static float f_atan2(float y, float x) {
   float r = 0.0f;
   __asm {
@@ -353,6 +361,7 @@ static float f_atan2(float y, float x) {
   return r;
 }
 
+#if RSC_DIAGNOSTIC
 // Previous frame's look-at point, so the periodic line can report how fast the chase camera's
 // target is actually travelling. Purely observational.
 static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
@@ -495,6 +504,14 @@ static float shape_axis(float v, int invert) {
   return sign * ((mag - dz) / (1.0f - dz));
 }
 
+// Hand the camera back to the client. Used by the recentre control, by the suppressed states, and
+// by the optional drift-back once it arrives -- all of which mean the same thing: stop holding an
+// angle, and let the chase camera do exactly what it would have done without this plugin.
+static void release_camera(void) {
+  g_have_yaw = 0;
+  g_pitch_offset = 0.0f;
+}
+
 // ---------------------------------------------------------------------------
 // The hook body
 //
@@ -507,9 +524,10 @@ static void __cdecl on_camera_updated(void) {
   vec3f* src;
   vec3f* tgt;
   float vx, vy, vz, h, r;
-  float dyaw, dpitch, s, c, nx, nz, nh, ny;
+  float dyaw, s, c, nx, nz, nh, ny;
   float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
   pad_state pad;
+  float auto_yaw;
   int have_pad, recentre;
 
   g_frames++;
@@ -530,11 +548,9 @@ static void __cdecl on_camera_updated(void) {
   if (recentre && !g_recentre_held) {
     // Logged on the EDGE, not sampled: a press lasts a few frames, so the periodic line below will
     // essentially never catch one. This is what confirms which control is actually bound.
-    rsc_diag("recentre fired (btn=%04X lt=%d rt=%d) -- cleared yaw=%d/1000 pitch=%d/1000",
-             pad.buttons, pad.lt, pad.rt,
-             f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f));
-    g_yaw_offset = 0.0f;
-    g_pitch_offset = 0.0f;
+    rsc_diag("recentre fired (btn=%04X lt=%d rt=%d) -- released (was holding=%d yaw=%d/1000)",
+             pad.buttons, pad.lt, pad.rt, g_have_yaw, f_toint(g_camera_yaw * 1000.0f));
+    release_camera();
   }
   g_recentre_held = recentre;
 
@@ -556,62 +572,22 @@ static void __cdecl on_camera_updated(void) {
     float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
     float dist = f_sqrt(ax * ax + ay * ay + az * az);
     rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
-             "menuflags=%08X | yaw=%d/1000 pitch=%d/1000 | auto: yaw=%d/1000 dist=%d tgtspeed=%d",
+             "menuflags=%08X | holding=%d yaw=%d/1000 pitch=%d/1000 | "
+             "auto: yaw=%d/1000 dist=%d tgtspeed=%d",
              g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
              f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
-             flags, f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f),
+             flags, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
+             f_toint(g_pitch_offset * 1000.0f),
              f_toint(f_atan2(ax, az) * 1000.0f), f_toint(dist), f_toint(g_target_move * 100.0f));
   }
 #endif
 
-  // Cutscenes, teleports and menu states where the client snaps or freezes the camera. Recentre
-  // rather than merely pausing: coming out of a cutscene holding a stale offset would look like the
-  // camera had drifted on its own.
+  // Cutscenes, teleports and menu states where the client snaps or freezes the camera. Hand
+  // control straight back rather than trying to hold an angle through them.
   if (flags & (DWORD)g_suppress) {
-    g_yaw_offset = 0.0f;
-    g_pitch_offset = 0.0f;
+    release_camera();
     return;
   }
-
-  // Accumulate only when there is a pad to read. With none, the offset simply holds where it is --
-  // that is "no new input", not "recentre the camera".
-  if (have_pad) {
-    // Negated after the first in-game session: pushing the stick right must swing the view right,
-    // and the unnegated sense read backwards. RightStickInvertX now means "the other way from the
-    // one that felt natural", which is what an invert switch should mean.
-    float steer_x = shape_axis(-pad.rx, g_invert_x);
-    // XInput's Y is positive-UP, and a positive pitch here RAISES the eye (i.e. looks further
-    // down). Negating makes stick-forward look up, which is the un-inverted convention;
-    // RightStickInvertY then means what its name says.
-    float steer_y = g_allow_pitch ? shape_axis(-pad.ry, g_invert_y) : 0.0f;
-
-    dyaw = steer_x * rate;
-    g_yaw_offset = wrap_angle(g_yaw_offset + dyaw);
-
-    if (g_allow_pitch) {
-      dpitch = steer_y * rate;
-      g_pitch_offset += dpitch;
-      if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
-      if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
-    }
-
-    // Ease back behind the character while the player is moving and NOT steering. Steering wins
-    // outright rather than being blended against: a decay that fought live input would make the
-    // stick feel like it had a weaker pull the further you turned, which is worse than either
-    // behaviour on its own.
-    if (g_return_speed > 0) {
-      float move = move_magnitude(&pad);
-      float step = (float)g_return_speed * DEG2RAD / 30.0f * move;   // deg/s -> rad/frame at 30fps
-
-      if (move > 0.0f) {
-        if (steer_x == 0.0f) g_yaw_offset = decay_toward_zero(g_yaw_offset, step);
-        if (steer_y == 0.0f) g_pitch_offset = decay_toward_zero(g_pitch_offset, step);
-      }
-    }
-  }
-
-  if (g_yaw_offset == 0.0f && g_pitch_offset == 0.0f)
-    return;                              // centred: leave the auto-camera's point byte-identical
 
   // The eye relative to the look-at point. Y is the vertical axis here: the client's own degenerate
   // case at 0x004D2158 is "X and Z deltas are both zero", which it treats as looking straight
@@ -625,15 +601,76 @@ static void __cdecl on_camera_updated(void) {
   if (r <= 0.0f)
     return;                              // source and target coincide; the client fixes this itself
 
-  // Yaw: rotate about the vertical axis. Length preserved, so the auto-camera keeps full control of
-  // how far back the camera sits.
-  s = f_sin(g_yaw_offset);
-  c = f_cos(g_yaw_offset);
+  // The chase camera's OWN yaw this frame -- where it wants the eye, before we say anything.
+  auto_yaw = (h > 0.0f) ? f_atan2(vx, vz) : g_camera_yaw;
+
+  if (have_pad) {
+    // Negated after the first in-game session: pushing the stick right must swing the view right,
+    // and the unnegated sense read backwards. RightStickInvertX now means "the other way from the
+    // one that felt natural", which is what an invert switch should mean.
+    float steer_x = shape_axis(-pad.rx, g_invert_x);
+    // XInput's Y is positive-UP, and a positive pitch here RAISES the eye (i.e. looks further
+    // down). Negating makes stick-forward look up, which is the un-inverted convention;
+    // RightStickInvertY then means what its name says.
+    float steer_y = g_allow_pitch ? shape_axis(-pad.ry, g_invert_y) : 0.0f;
+
+    if (steer_x != 0.0f || steer_y != 0.0f) {
+      // Take control on first touch, seeded from wherever the chase camera currently is, so
+      // engaging never produces a jump.
+      if (!g_have_yaw) {
+        g_camera_yaw = auto_yaw;
+        g_have_yaw = 1;
+      }
+      g_camera_yaw = wrap_angle(g_camera_yaw + steer_x * rate);
+
+      if (g_allow_pitch) {
+        g_pitch_offset += steer_y * rate;
+        if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
+        if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
+      }
+    } else if (g_return_speed > 0 && g_have_yaw) {
+      // Optional drift back to whatever the chase camera wants, while moving. OFF by default: in
+      // combat it fights both the player and the chase camera, which is exactly what a held camera
+      // is supposed to prevent.
+      float move = move_magnitude(&pad);
+
+      if (move > 0.0f) {
+        float step = (float)g_return_speed * DEG2RAD / 30.0f * move;  // deg/s -> rad/frame at 30fps
+        float delta = wrap_angle(g_camera_yaw - auto_yaw);
+
+        if (f_abs(delta) <= step && g_pitch_offset == 0.0f) {
+          release_camera();              // arrived: let the chase camera have it back outright
+        } else {
+          g_camera_yaw = wrap_angle(auto_yaw + decay_toward_zero(delta, step));
+          g_pitch_offset = decay_toward_zero(g_pitch_offset, step);
+        }
+      }
+    }
+  }
+
+  // Not holding an angle and no pitch applied: leave the chase camera's point byte-identical, so a
+  // player who never touches the right stick gets stock behaviour.
+  if (!g_have_yaw && g_pitch_offset == 0.0f)
+    return;
+
+  // ⭐ ABSOLUTE, not additive. Rotate by exactly the difference between the angle we are holding and
+  // the one the chase camera just chose, so the result IS g_camera_yaw regardless of what the chase
+  // camera did this frame.
+  //
+  // The additive version this replaced -- a fixed offset added to the chase camera's yaw -- is
+  // wrong for a camera you aim: the chase camera re-aims itself continuously as the character runs
+  // and turns, so the view swung around on its own with the stick untouched. In combat that is
+  // actively harmful. Holding an absolute world angle is what "rotate the camera with the right
+  // stick" actually means. Distance and height are still entirely the chase camera's to choose.
+  dyaw = g_have_yaw ? wrap_angle(g_camera_yaw - auto_yaw) : 0.0f;
+
+  s = f_sin(dyaw);
+  c = f_cos(dyaw);
   nx = vx * c + vz * s;
   nz = -vx * s + vz * c;
 
   // Pitch: the same rotation applied to the (horizontal distance, height) pair, then folded back
-  // into x/z by scaling. Doing it this way needs no atan2 or asin -- only the sqrt above.
+  // into x/z by scaling. Doing it this way needs no asin -- only the sqrt above.
   ny = vy;
   if (g_pitch_offset != 0.0f && h > 0.0f) {
     s = f_sin(g_pitch_offset);
@@ -641,7 +678,7 @@ static void __cdecl on_camera_updated(void) {
     nh = h * c - vy * s;
     ny = h * s + vy * c;
     // Refuse to pass the hard limit or to cross the axis. The accumulator clamp bounds only OUR
-    // contribution; the auto-camera's own pitch rides underneath it, so the total needs its own
+    // contribution; the chase camera's own pitch rides underneath it, so the total needs its own
     // stop. Rejecting the whole pitch step leaves yaw working, which is the half players notice.
     if (nh <= 0.0f || f_abs(ny) > PITCH_SIN_LIMIT * r) {
       ny = vy;

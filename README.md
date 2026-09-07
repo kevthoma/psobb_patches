@@ -71,7 +71,7 @@ Settings live in `widescreen.cfg`:
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
 | `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
-| `RightStickReturnSpeed` | `90` | Degrees/second the camera eases back behind you **while moving**. `0` holds the offset indefinitely. |
+| `RightStickReturnSpeed` | `0` | Degrees/second the camera drifts back behind you while moving. `0` (default) holds the angle you set. |
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
@@ -80,12 +80,20 @@ Settings live in `widescreen.cfg`:
 pitch the two end up solving for height at the same time and it reads oddly in play. Set
 `RightStickPitch=1` to try it.
 
-**The camera eases back behind you as you move.** A fixed offset means the camera is never behind
-the character, so the chase camera pulls one way while the offset holds the other — which reads as
-the camera misbehaving while you run. Standing still it holds, so you can look around; and steering
-always wins over the decay rather than being blended with it, since a pull that got weaker the
-further you turned would feel worse than either behaviour alone. `RightStickReturnSpeed=0` restores
-the original hold-forever behaviour.
+**The camera holds an absolute world angle, and it is not an offset from the chase camera.** Each
+frame the plugin reads the angle the chase camera just chose and cancels it, so the view stays
+exactly where you aimed it while you run and turn. The chase camera keeps full control of distance
+and height; only yaw is taken over, and only once you have actually touched the right stick — until
+then the client behaves exactly as it does without this plugin.
+
+That is the point of a right-stick camera: aim the view with one thumb while positioning the
+character with the other. An earlier build added a fixed *offset* to the chase camera's yaw instead,
+which meant the view swung around on its own as the chase camera re-aimed itself — mildly odd while
+exploring, actively harmful in combat.
+
+`RightStickReturnSpeed` makes the held angle drift back toward the chase camera's while you move.
+It is **off by default** for the same reason: it fights both the player and the chase camera to undo
+the thing the feature exists to do.
 
 **Recentring** hangs off the client's own Camera binding (`PAD BUTTON7` in the default pad config).
 Because the offset is added on top of the chase camera, a recentre that does not also clear the
