@@ -52,7 +52,16 @@
 #define ADDR_SET_POINTS     0x004D1FF4   // set_global_camera_source_and_target(camera behaviour obj)
 #define ADDR_CAMERA_STATE   0x00A48A54   // -> camera_state_struct*, 0x1D4 bytes
 #define ADDR_MENU_FLAGS     0x00A489FC   // g_GenericMenuSubSelection
-#define ADDR_JOYSTATE       0x00ADCC80   // g_joyState, a whole DIJOYSTATE2 (0x110 bytes)
+// ⛔ NOT USED, and deliberately so. g_joyState (DIJOYSTATE2, 0x110 bytes) lives at 0x00ADCC80, and
+// the first two builds read the right stick from it. It does not work: it is the PAD CONFIG SCREEN'S
+// BINDING-CAPTURE BUFFER, not gameplay input. Proof in our own binary -- the only three references to
+// 0x00ADCC80 anywhere (0x842485, 0x8424D2, 0x8424EC) are inside the two poll routines themselves, and
+// each poll routine has exactly one caller, both inside the config UI at 0x00790E16 / 0x007915E1.
+// (PollJoystickStateWithFrameDelta compares per-axis deltas against 4096.0f -- "which axis did you
+// just move?", i.e. binding capture.) So it is refreshed ONLY while that screen is open, and then
+// FREEZES at the last value: measured in game, Z=34205 Rz=18100 unchanged for three minutes while
+// the camera span. A stale axis is indistinguishable from a held stick, so this can never be a safe
+// input source. Read the pad ourselves instead -- see the XInput section below.
 
 // camera_state_struct offsets. Confirmed: 0x004D1FF4 itself writes +0x1A0/+0x1A4/+0x1A8 through the
 // pointer at ADDR_CAMERA_STATE, and 0x004D2158 reads +0x184 minus +0x178 as target-minus-source.
@@ -62,30 +71,32 @@
 #define OFF_DESIRED_SOURCE  0x1A0        // vec3f  <-- the one field this plugin writes
 #define OFF_DESIRED_TARGET  0x1AC        // vec3f, the pivot we rotate about
 
-// DIJOYSTATE2 axis offsets. PSOBB uses c_dfDIJoystick2 verbatim and never calls
-// SetProperty(DIPROP_RANGE), so values arrive in the driver's native scale.
-#define DIJ_LX              0x00
-#define DIJ_LY              0x04
-#define DIJ_LZ              0x08
-#define DIJ_LRX             0x0C
-#define DIJ_LRY             0x10
-#define DIJ_LRZ             0x14
+// ---------------------------------------------------------------------------
+// Input: XInput, read directly
+//
+// PSOBB holds its DirectInput device with DISCL_EXCLUSIVE, so we cannot open that. XInput is a
+// separate API and is not affected. This install ships Xidi (Xidi.32.dll, Mapper Type =
+// StandardGamepad), whose entire purpose is to present an XInput pad to a DirectInput game -- so the
+// physical controller IS an XInput device, by construction, and XInputGetState will see it.
+//
+// This also removes the stale-value hazard that made the g_joyState approach unsafe: XInput reports
+// connection state explicitly, so "no pad" and "pad at rest" are different answers rather than the
+// same all-zero buffer.
+//
+// Loaded dynamically. A static import of xinput1_4.dll would refuse to start the client on a machine
+// that only has an older one, which is a bad trade for a camera nicety.
+// ---------------------------------------------------------------------------
+#define XI_MAX_USERS        4
+#define XI_RESCAN_FRAMES    120          // ~4s between scans while no pad is connected
+#define XI_THUMB_SCALE      32767.0f     // sThumbRX/RY are SHORT, centred at 0
 
-// ✅ CONFIRMED IN GAME 2026-09-07. The right stick is on Z and Rz: those are the two axes that move
-// when it does (Z 32714 -> 32560, Rz 32846 -> 32917), while X/Y sit at exactly 32767 and the unused
-// Rx/Ry sit at 0. Still config keys, because the device is Xidi's virtual pad
-// (Mapper Type = StandardGamepad) and a different mapper would land elsewhere.
-#define DEFAULT_AXIS_YAW    DIJ_LRZ
-#define DEFAULT_AXIS_PITCH  DIJ_LZ
-
-// ⚠ Axis range is UNSIGNED 0..65535 with the centre near 32768 -- NOT signed +/-32767.
-// Measured in game 2026-09-07: a resting pad reads X=32767 Y=32767 Z=32714 Rz=32846. PSOBB never
-// calls SetProperty(DIPROP_RANGE), so the axes arrive in DirectInput's DEFAULT range, which is
-// unsigned. Reading them as signed treats a centred stick as full deflection, which is exactly the
-// runaway spin the first build produced. The client's own 4096.0f threshold (@0x0098B350) is a
-// FRAME DELTA, not an absolute position, so it does not contradict this.
-#define AXIS_CENTRE         32768.0f
-#define AXIS_HALF_SCALE     32768.0f
+// XINPUT_STATE is {DWORD dwPacketNumber; XINPUT_GAMEPAD Gamepad;} and XINPUT_GAMEPAD is
+// {WORD wButtons; BYTE bLeftTrigger; BYTE bRightTrigger; SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY;}
+// -- 16 bytes total. Declared by offset rather than including XInput.h, which would drag in a
+// different SDK surface for two SHORTs.
+#define XI_STATE_BYTES      16
+#define XI_OFF_THUMB_RX     12
+#define XI_OFF_THUMB_RY     14
 
 // Bits of g_GenericMenuSubSelection that mean "leave the camera alone".
 //
@@ -140,13 +151,13 @@ static int g_invert_x    = 0;            // RightStickInvertX
 // line either way, and shipping a wrong "fix" is worse than shipping the raw axis.
 static int g_invert_y    = 0;            // RightStickInvertY
 static int g_allow_pitch = 1;            // RightStickPitch
-static int g_axis_yaw    = DEFAULT_AXIS_YAW;
-static int g_axis_pitch  = DEFAULT_AXIS_PITCH;
 static int g_suppress    = DEFAULT_SUPPRESS;
-// Where a resting axis sits. 32768 is DirectInput's default-range centre and is what this client's
-// pad actually reports; exposed only so a device that really does report signed axes (centre 0) can
-// be accommodated without a rebuild.
-static float g_axis_centre = AXIS_CENTRE;
+
+// XInput, resolved at load. NULL means no usable XInput DLL and therefore no camera control.
+typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD dwUserIndex, void* pState);
+static PFN_XInputGetState g_xinput_get_state = NULL;
+static int   g_xi_user   = -1;           // the connected slot, or -1 if not known
+static DWORD g_xi_rescan = 0;            // frames left before scanning slots again
 
 // Accumulated offset from wherever the auto-camera would have put the eye. Persisted only in
 // memory: a camera angle is not worth a file, and starting each session centred is the behaviour
@@ -229,17 +240,8 @@ static void load_config(void) {
   g_invert_x    = cfg_int(buf, got, "RightStickInvertX", g_invert_x) ? 1 : 0;
   g_invert_y    = cfg_int(buf, got, "RightStickInvertY", g_invert_y) ? 1 : 0;
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
-  g_axis_yaw    = cfg_int(buf, got, "RightStickAxisYaw", g_axis_yaw);
-  g_axis_pitch  = cfg_int(buf, got, "RightStickAxisPitch", g_axis_pitch);
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
-  g_axis_centre = (float)cfg_int(buf, got, "RightStickAxisCentre", (int)AXIS_CENTRE);
 
-  // A nonsense axis offset would read outside the 0x110-byte joystick buffer. Clamp to the six
-  // documented axis slots rather than trusting a hand-edited config.
-  if (g_axis_yaw < 0 || g_axis_yaw > DIJ_LRZ || (g_axis_yaw & 3))
-    g_axis_yaw = DEFAULT_AXIS_YAW;
-  if (g_axis_pitch < 0 || g_axis_pitch > DIJ_LRZ || (g_axis_pitch & 3))
-    g_axis_pitch = DEFAULT_AXIS_PITCH;
   if (g_sensitivity < 1) g_sensitivity = 1;
   if (g_sensitivity > 1000) g_sensitivity = 1000;
   if (g_deadzone < 0) g_deadzone = 0;
@@ -310,27 +312,68 @@ static float wrap_angle(float a) {
   return a;
 }
 
-// ⚠ Is there actually a pad, and has it been read yet?
-//
-// Two states produce an all-zero axis block: the frames before Xidi first fills g_joyState (seen in
-// the very first log lines), and a player with no controller at all -- for whom it is permanent.
-// Since a centred axis reads ~32768, treating zero as a position would peg the stick to full
-// deflection and spin the camera forever. For the keyboard-only player that would be a permanently
-// broken camera with no way to guess why, so this is a correctness guard, not a nicety.
-//
-// An unused axis rests at 0 while a used one rests at centre (measured: Rx=Ry=0, X=Y=32767), so
-// "every axis is exactly zero" cannot happen once a pad is live -- it is unambiguous.
-static int joystick_ready(void) {
-  return *(long*)(ADDR_JOYSTATE + DIJ_LX)  || *(long*)(ADDR_JOYSTATE + DIJ_LY)
-      || *(long*)(ADDR_JOYSTATE + DIJ_LZ)  || *(long*)(ADDR_JOYSTATE + DIJ_LRX)
-      || *(long*)(ADDR_JOYSTATE + DIJ_LRY) || *(long*)(ADDR_JOYSTATE + DIJ_LRZ);
+// Resolve XInputGetState from whichever runtime is present, newest first. 1_4 ships with Win8+,
+// 1_3 with the old DirectX redist, 9_1_0 is the legacy always-present one.
+static void xinput_init(void) {
+  static const char* const dlls[3] = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll" };
+  HMODULE h;
+  int i;
+
+  for (i = 0; i < 3; i++) {
+    h = LoadLibraryA(dlls[i]);
+    if (!h)
+      continue;
+    g_xinput_get_state = (PFN_XInputGetState)GetProcAddress(h, "XInputGetState");
+    if (g_xinput_get_state) {
+      rsc_log("xinput: using %s", dlls[i]);
+      return;
+    }
+  }
+  // Worth a log line rather than silence: with no XInput the stick simply does nothing, which looks
+  // exactly like a failed hook.
+  rsc_log("xinput: no usable XInput DLL -- right stick unavailable");
 }
 
-// One axis, normalised to -1..1 about the centre, with the deadzone removed and rescaled so the
-// first movement past the deadzone starts from zero rather than jumping.
-static float read_axis(int off, int invert) {
-  long raw = *(long*)(ADDR_JOYSTATE + off);
-  float v = ((float)raw - g_axis_centre) / AXIS_HALF_SCALE;
+// Right stick as two floats in -1..1, or 0 if there is no connected pad. Unlike the g_joyState
+// buffer this replaced, "not connected" is an explicit answer, so a missing pad can never be
+// mistaken for a held stick.
+static int read_right_stick(float* out_x, float* out_y) {
+  BYTE st[XI_STATE_BYTES];
+  DWORD i;
+
+  if (!g_xinput_get_state)
+    return 0;
+
+  // Fast path: the slot we already know about.
+  if (g_xi_user >= 0) {
+    if (g_xinput_get_state((DWORD)g_xi_user, st) == ERROR_SUCCESS) {
+      *out_x = (float)(*(short*)(st + XI_OFF_THUMB_RX)) / XI_THUMB_SCALE;
+      *out_y = (float)(*(short*)(st + XI_OFF_THUMB_RY)) / XI_THUMB_SCALE;
+      return 1;
+    }
+    g_xi_user = -1;                      // unplugged
+  }
+
+  // Scanning every frame is wasteful when nothing is plugged in, so back off between sweeps.
+  if (g_xi_rescan) {
+    g_xi_rescan--;
+    return 0;
+  }
+  for (i = 0; i < XI_MAX_USERS; i++) {
+    if (g_xinput_get_state(i, st) == ERROR_SUCCESS) {
+      g_xi_user = (int)i;
+      *out_x = (float)(*(short*)(st + XI_OFF_THUMB_RX)) / XI_THUMB_SCALE;
+      *out_y = (float)(*(short*)(st + XI_OFF_THUMB_RY)) / XI_THUMB_SCALE;
+      return 1;
+    }
+  }
+  g_xi_rescan = XI_RESCAN_FRAMES;
+  return 0;
+}
+
+// Deadzone and rescale, so the first movement past the deadzone starts from zero rather than
+// jumping. Input is already -1..1 about centre.
+static float shape_axis(float v, int invert) {
   float dz = (float)g_deadzone / 100.0f;
   float sign, mag;
 
@@ -357,6 +400,9 @@ static void __cdecl on_camera_updated(void) {
   vec3f* tgt;
   float vx, vy, vz, h, r;
   float dyaw, dpitch, s, c, nx, nz, nh, ny;
+  float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
+  float stick_x = 0.0f, stick_y = 0.0f;
+  int have_pad;
 
   g_frames++;
   if (!cam)
@@ -365,15 +411,18 @@ static void __cdecl on_camera_updated(void) {
   src = (vec3f*)(cam + OFF_DESIRED_SOURCE);
   tgt = (vec3f*)(cam + OFF_DESIRED_TARGET);
 
+  // Read the pad exactly ONCE per frame. read_right_stick has side effects -- it caches the
+  // connected slot and counts down the rescan backoff -- so calling it a second time just for the
+  // log would make diagnostic builds behave differently from release ones.
+  have_pad = read_right_stick(&stick_x, &stick_y);
+
 #if RSC_DIAGNOSTIC
   if ((g_frames % RSC_DIAG_EVERY) == 0) {
-    // The two unknowns, side by side: every axis (to find the right stick) and the live menu mask
-    // (to find the bits that mean "hands off"). Both are single-launch questions.
-    rsc_diag("axes X=%d Y=%d Z=%d Rx=%d Ry=%d Rz=%d | ready=%d | menuflags=%08X | yaw=%d/1000 pitch=%d/1000",
-             *(long*)(ADDR_JOYSTATE + DIJ_LX),  *(long*)(ADDR_JOYSTATE + DIJ_LY),
-             *(long*)(ADDR_JOYSTATE + DIJ_LZ),  *(long*)(ADDR_JOYSTATE + DIJ_LRX),
-             *(long*)(ADDR_JOYSTATE + DIJ_LRY), *(long*)(ADDR_JOYSTATE + DIJ_LRZ),
-             joystick_ready() ? 1 : 0,
+    // Whether a pad is seen at all, what it reads, and the live menu mask -- the three things that
+    // distinguish "not connected" from "connected but suppressed" from "working".
+    rsc_diag("xinput slot=%d connected=%d rx=%d/1000 ry=%d/1000 | menuflags=%08X | "
+             "yaw=%d/1000 pitch=%d/1000",
+             g_xi_user, have_pad, f_toint(stick_x * 1000.0f), f_toint(stick_y * 1000.0f),
              flags, f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f));
   }
 #endif
@@ -389,14 +438,15 @@ static void __cdecl on_camera_updated(void) {
 
   // Accumulate only when there is a pad to read. With none, the offset simply holds where it is --
   // that is "no new input", not "recentre the camera".
-  if (joystick_ready()) {
-    dyaw = read_axis(g_axis_yaw, g_invert_x) * BASE_DEGREES * DEG2RAD
-           * ((float)g_sensitivity / 100.0f);
+  if (have_pad) {
+    dyaw = shape_axis(stick_x, g_invert_x) * rate;
     g_yaw_offset = wrap_angle(g_yaw_offset + dyaw);
 
     if (g_allow_pitch) {
-      dpitch = read_axis(g_axis_pitch, g_invert_y) * BASE_DEGREES * DEG2RAD
-               * ((float)g_sensitivity / 100.0f);
+      // XInput's Y is positive-UP, and a positive pitch here RAISES the eye (i.e. looks further
+      // down). Negating makes stick-forward look up, which is the un-inverted convention;
+      // RightStickInvertY then means what its name says.
+      dpitch = shape_axis(-stick_y, g_invert_y) * rate;
       g_pitch_offset += dpitch;
       if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
       if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
@@ -501,6 +551,7 @@ __declspec(dllexport) void __stdcall load(void) {
   }
 
   load_config();
+  xinput_init();
   if (!g_enabled) {
     rsc_log("disabled (RightStickCamera=0)");
     return;
@@ -508,9 +559,9 @@ __declspec(dllexport) void __stdcall load(void) {
 
   if (patch_camera()) {
     rsc_log("patched ok (call %08X -> hook) sens=%d%% deadzone=%d%% pitch=%s invX=%d invY=%d "
-            "axes yaw=+0x%02X pitch=+0x%02X centre=%d suppress=%03X%s",
+            "suppress=%03X xinput=%s%s",
             ADDR_UPDATE_CALL, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_axis_yaw, g_axis_pitch, f_toint(g_axis_centre), g_suppress,
+            g_invert_x, g_invert_y, g_suppress, g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
     // No dialog: a camera feature must not interrupt every launch. But it must not be silent

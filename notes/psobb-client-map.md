@@ -632,30 +632,57 @@ player is looking. This was the plan of record until the struct above was found;
 Y is the vertical axis: the degenerate case in the view-matrix path (`0x004D2158`) is "X and Z deltas
 are both zero", which it treats as looking straight up or down and nudges out of.
 
-### Input
+### Input — ⛔ `g_joyState` IS NOT GAMEPLAY INPUT (2026-09-07)
 
-`g_joyState` — a whole `DIJOYSTATE2` (`0x110` bytes) @ **`0x00ADCC80`**. `PollJoystickState`
-(`0x00842460`) calls `GetDeviceState(0x110, buf)` on `g_pDevice[0]` (`0x00ADC9BC`) and `rep movsd`s
-the result there, so reading it costs nothing and cannot disagree with what the game itself saw.
-The client's own frame-delta threshold is `4096.0f` @ `0x0098B350` (12.5% of a signed-16-bit axis).
+`g_joyState`, a whole `DIJOYSTATE2` (`0x110` bytes), is at **`0x00ADCC80`**, and `PollJoystickState`
+(`0x00842460`) does `GetDeviceState(0x110, buf)` on `g_pDevice[0]` (`0x00ADC9BC`) then `rep movsd`s
+it there. All true, and all useless for reading the controller during play.
 
-⚠ The client calls `SetCooperativeLevel(DISCL_EXCLUSIVE | DISCL_BACKGROUND)` — it owns the pad even
-unfocused, which is why other gamepad-aware apps lose it while PSO runs. Read `g_joyState`; do not
-open a second device.
+**It is the Pad Button Config screen's binding-capture buffer.** The only three references to
+`0x00ADCC80` in the whole binary — `0x842485`, `0x8424D2`, `0x8424EC` — are inside the two poll
+routines themselves, and each routine has exactly one caller, both in the config UI
+(`0x00790E16` → `PollJoystickStateWithFrameDelta`, `0x007915E1` → `PollJoystickState`). The
+frame-delta variant compares each axis against `4096.0f` @ `0x0098B350`, i.e. "which axis did you
+just move?" — binding capture, not input.
+
+So it is refreshed **only while that screen is open**, and then **freezes at its last value**.
+Measured in game: `Z=34205 Rz=18100` unchanged for three minutes while the camera span from the
+stale reading. A frozen axis is indistinguishable from a held stick, so this can never be a safe
+input source.
+
+⚠ **This is where the psobb.io `input.h` is wrong**: it claims `g_joyState` is "read by code outside
+this subsystem (menu / camera / heading update paths)". Our binary says nothing outside the poll
+routines touches it. The write was verified and the *readers* were taken on trust — exactly the
+mistake the provenance rule exists to prevent.
+
+➡ **Read the pad with XInput instead.** The client holds its DirectInput device
+`DISCL_EXCLUSIVE | DISCL_BACKGROUND` (which is why other gamepad apps lose it while PSO runs), so it
+cannot be shared — but XInput is a separate API and is unaffected. Our builds ship Xidi, whose whole
+purpose is presenting an XInput pad to this DirectInput game, so the physical controller is an XInput
+device by construction. Load `XInputGetState` dynamically (`xinput1_4` → `1_3` → `9_1_0`); a static
+import refuses to start the client on a machine without that exact DLL.
+
+⚠ And note the axis convention differs between the two APIs. DirectInput here delivers **unsigned
+`0..65535` centred at ~32768** (PSOBB never calls `SetProperty(DIPROP_RANGE)`, so axes arrive in the
+default range) — reading those as signed makes a centred stick look pegged. XInput thumbsticks are
+**signed `SHORT`, centred at 0, Y positive-up**.
 
 ### Still unverified
 
 Two things that reading the binary cannot settle, both left configurable rather than compiled in:
 
-1. **Which axes carry the right stick.** The device is Xidi's virtual pad
-   (`Mapper Type = StandardGamepad`), not the physical controller. The psobb.io input notes say
-   `lZ` (+0x08) is the right stick's vertical and `lRz` (+0x14) its horizontal; that is the default.
-2. **Which `g_GenericMenuSubSelection` (`0x00A489FC`) bits mean "leave the camera alone."** `0x0C`
-   selects the snap branch inside `0x004D1FF4`; `0x820` is the mask the update itself tests to skip
-   collision and smoothing. Suppressing on `0x82C` is the conservative reading, not an observation.
+1. **Which `g_GenericMenuSubSelection` (`0x00A489FC`) bits mean "leave the camera alone."** Settled
+   partly: `0x82C` was wrong. `0x0C` only selects the branch inside `0x004D1FF4` that writes the
+   *current* points as well as the desired ones — it does not mean hands-off, and bit `0x4` is set
+   during ordinary play (live masks `0x604`, `0x204`, `0x600`), so `0x82C` disabled the feature most
+   of the time. Now `0x820`, the mask the update itself tests. Whether cutscenes need more bits is
+   still untested.
+2. **Which way is up.** XInput's Y is positive-up and a positive pitch here raises the eye, so the
+   plugin negates it to get the un-inverted convention. Not yet confirmed by feel.
 
-A diagnostic build of the plugin logs all six axes and the live mask, which answers both in one
-session.
+Where the right stick lives is **settled**: the client's own Pad Button Config shows
+`Right Analog Left/Right = PAD Z Axis` and `Right Analog Forward/Backward = PAD Z Rotate`, matching
+the axes observed moving. Base PSO has the bindings; it just never drives a camera with them.
 
 ## Structures (protocol side, from newserv — reliable)
 

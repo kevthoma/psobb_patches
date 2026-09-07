@@ -71,10 +71,8 @@ Settings live in `widescreen.cfg`:
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
 | `RightStickPitch` | `1` | Allow vertical look. `0` leaves height entirely to the game. |
-| `RightStickAxisYaw` / `RightStickAxisPitch` | `0x14` / `0x08` | `DIJOYSTATE2` axis offsets — see below. |
-| `RightStickAxisCentre` | `32768` | Where a resting axis sits. The axes arrive in DirectInput's default **unsigned** `0..65535` range, not signed. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
 
-The axis rows exist because the pad is Xidi's virtual device, not the physical controller, so a different mapper would land elsewhere. The defaults are measured, not assumed: on this client the right stick is on `Z`/`Rz` and a resting axis reads ~32768. A diagnostic build logs all six axes and the live menu mask to `corellia_rightstickcamera.log` if a different setup needs re-checking.
+Input comes from **XInput**, read directly, not from the game's own controller state. PSOBB's DirectInput device is opened `DISCL_EXCLUSIVE` so it cannot be shared, and the client's `DIJOYSTATE2` buffer turns out to be the Pad Button Config screen's binding-capture buffer — refreshed only while that screen is open, then frozen at its last value. Since this install ships Xidi (which exists to present an XInput pad to a DirectInput game), the physical controller is an XInput device by construction.
 
-With no controller attached the plugin does nothing — an unread `g_joyState` is all zeroes, which is not a stick position.
+With no controller attached the plugin does nothing: XInput reports connection state explicitly, so "no pad" and "pad at rest" are different answers.
