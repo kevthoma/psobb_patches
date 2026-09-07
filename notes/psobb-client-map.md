@@ -534,10 +534,20 @@ is created on demand at `0x00734216` / `0x00734330`, stored at `+0x34`, and dest
 * **`widget_set_text` = `0x0078ED74`** — `__thiscall(ecx = widget, const wchar_t*)`, callee-cleaned.
   Forwards to `0x007310EC`, which wcslens, **clamps to 127 chars**, allocates `len*2+2` and copies.
 * Both creation sites end `mov eax,[ebp-0x14]; mov [eax+0x34], edx` — 6 bytes, enough for a call+nop.
-* ⚠ Unresolved: which site is name and which is password (proximity suggests `0x00734216`→password,
-  `0x00734330`→name, but that is layout inference, not a trace); whether anything frees `+0x24`/`+0x28`
-  (if so, they must be filled with the client's own allocator, not a static buffer); and whether those
-  summary lines are hardcoded like Play Mode was.
+* ⛔ **The destructor FREES both pointers** — `0x00733E64` does `free([+0x28])` then `free([+0x24])` via
+  `0x00857E98`. So a restored name/password must be allocated with the client's own allocator
+  (**`0x008581C5`**, the same malloc `get_text` uses) and the pointer stored there. Pointing `+0x24`/
+  `+0x28` at a static buffer hands `free()` a non-heap pointer — heap corruption that would surface
+  somewhere unrelated, long after the cause. (`free(NULL)` is why the constructor's NULL init is safe.)
+* Class vtable is at **`0x00B408D0`**: `[0]` destructor `0x00733E40` (body `0x00733E64`),
+  `[1]` update `0x007340A4` — which confirms the menu-building/commit function is virtual method 1.
+* ❓ **Which creation site is name and which is password is NOT settled.** Site A `0x00734216` passes
+  maxlen `0x10`; site B `0x00734330` passes `4, 0, 0x0E`. 14 + the 2-char `	E` marker = the 16-wchar
+  field, which argues site B is the NAME — the opposite of what address proximity suggests, and site B's
+  extra arguments hint at a different widget configuration. **Settle this by logging both sites from a
+  diagnostic build and opening the Party Name field in game.** Guessing puts the password in the name box.
+* The stored value must include the **`	E` language marker** — see [[corellia-qol-requests]] for the
+  Ephinea observation that established this.
 
 ### Calling into the client (conventions read off its own call sites, never assumed)
 
