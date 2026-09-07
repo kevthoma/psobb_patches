@@ -92,6 +92,21 @@ static WCHAR g_name[FIELD_WCHARS];
 static WCHAR g_password[FIELD_WCHARS];
 static BYTE  g_remember_text = 0;        // the launcher's RememberPartyInfo, OFF unless enabled
 
+static int gs_wlen(const WCHAR* w) {
+  int n = 0;
+  while (w && w[n] && n < 0x400) n++;
+  return n;
+}
+
+// Copy at most FIELD_WCHARS-1 and always terminate. The wire field is 16 wide chars and the client
+// truncates rather than overflows, so refusing to store more than fits keeps the two consistent.
+static void gs_wcopy(WCHAR* dst, const WCHAR* src) {
+  int i = 0;
+  if (!src) { dst[0] = 0; return; }
+  for (; i < FIELD_WCHARS - 1 && src[i]; i++) dst[i] = src[i];
+  dst[i] = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Persistence
 //
@@ -209,23 +224,8 @@ static void store_settings(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Small helpers -- no CRT is linked, so these are hand-rolled
+// Calling into the client: allocation and the two text setters
 // ---------------------------------------------------------------------------
-static int gs_wlen(const WCHAR* w) {
-  int n = 0;
-  while (w && w[n] && n < 0x400) n++;
-  return n;
-}
-
-// Copy at most FIELD_WCHARS-1 and always terminate. The wire field is 16 wide chars and the client
-// truncates rather than overflows, so refusing to store more than fits keeps the two consistent.
-static void gs_wcopy(WCHAR* dst, const WCHAR* src) {
-  int i = 0;
-  if (!src) { dst[0] = 0; return; }
-  for (; i < FIELD_WCHARS - 1 && src[i]; i++) dst[i] = src[i];
-  dst[i] = 0;
-}
-
 // A copy of `text` on the CLIENT's heap. The dialog destructor frees +0x24/+0x28, so anything stored
 // there has to come from the allocator that free() expects. Returns NULL if there is nothing to store.
 static WCHAR* gs_client_dup(const WCHAR* text) {
