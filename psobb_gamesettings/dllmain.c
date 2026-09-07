@@ -37,6 +37,8 @@
 // so it can only load at 0x00400000 and these are absolute, not RVAs.
 // ---------------------------------------------------------------------------
 #define ADDR_CTOR_ZERO      0x00733F98   // the two stores above, 8 bytes through 0x00733F9F
+#define ADDR_MENUBUILD_CALL 0x00733F7F   // `call 0x00734000` in the ctor -- builds the menu lines
+#define ADDR_MENUBUILD      0x00734000   // reads +0x1E to pick the Play Mode label, once, forever
 #define ADDR_CONFIRM_CALL   0x0079ADD7   // `call 0x007346CC` inside the confirm handler at 0x0079ADB8
 #define ADDR_GET_NAME       0x007346CC   // accessor the confirm path calls first, with ecx = the object
 
@@ -125,12 +127,12 @@ static void __cdecl on_dialog_constructed(BYTE* obj) {
   BYTE mode = 0, difficulty = 0;
 
   if (!obj) {
-    gs_diag("construct: NULL object -- hook fired on something unexpected");
+    gs_diag("write: NULL object -- hook fired on something unexpected");
     return;
   }
   // Logged BEFORE the write: the constructor should have left both at 0, so a non-zero "was" here
   // would mean the hook is running somewhere other than where it was meant to.
-  gs_diag("construct: obj=%08X was mode=%u difficulty=%u episode=%u",
+  gs_diag("write: obj=%08X was mode=%u difficulty=%u episode=%u",
           (DWORD)obj, obj[OFF_MODE], obj[OFF_DIFFICULTY], *(DWORD*)(obj + 0x20));
   // ⚠ BOTH fields must be written on EVERY call, even with nothing saved. The two stores this hook
   // replaced were the only initialisation they get -- the object comes from a plain allocation that
@@ -143,7 +145,7 @@ static void __cdecl on_dialog_constructed(BYTE* obj) {
 #endif
   obj[OFF_MODE] = mode;
   obj[OFF_DIFFICULTY] = difficulty;
-  gs_diag("construct: wrote mode=%u difficulty=%u (saved=%u, difficulty restore %s)",
+  gs_diag("write: now mode=%u difficulty=%u (saved=%u, difficulty restore %s)",
           obj[OFF_MODE], obj[OFF_DIFFICULTY], g_have_saved, RESTORE_DIFFICULTY ? "on" : "OFF");
 }
 
@@ -169,6 +171,22 @@ static void __cdecl on_dialog_confirmed(BYTE* obj) {
 // ---------------------------------------------------------------------------
 // Naked stubs
 // ---------------------------------------------------------------------------
+
+// Runs immediately before the constructor builds the dialog's menu lines, with ecx = the object.
+// The Play Mode label is chosen here and never refreshed, so the value has to be in place BEFORE
+// this call, not merely before the dialog is shown. The original call's return value (a widget,
+// stored at +0x2C) must survive, so this tail-jumps to it.
+void __declspec(naked) preBuildHook(void) {
+  __asm {
+    pushad
+    push ecx
+    call on_dialog_constructed
+    add  esp, 4
+    popad
+    mov  eax, ADDR_MENUBUILD
+    jmp  eax
+  }
+}
 
 // Replaces the constructor's two zeroing stores. edx = the object; eax is dead here (reloaded at
 // 0x00733FA0), but ecx must come out zeroed because the `xor ecx, ecx` we overwrote did that.
@@ -208,6 +226,7 @@ void __declspec(naked) saveHook(void) {
 // ---------------------------------------------------------------------------
 static BOOL patch_gamesettings(void) {
   DWORD confirm_target;
+  DWORD menubuild_target;
 
   // Refuse to patch anything that is not byte-for-byte what was analysed. A wrong address here writes
   // a call into the middle of unrelated code, which would fault far away from the cause.
@@ -220,12 +239,21 @@ static BOOL patch_gamesettings(void) {
   if (confirm_target != ADDR_GET_NAME)
     return FALSE;                            // it is a call, but not the one we mean
 
+  if (*(BYTE*)ADDR_MENUBUILD_CALL != 0xE8)
+    return FALSE;
+  menubuild_target = (DWORD)(ADDR_MENUBUILD_CALL + 5 + *(LONG*)(ADDR_MENUBUILD_CALL + 1));
+  if (menubuild_target != ADDR_MENUBUILD)
+    return FALSE;
+
   // Constructor: 8 bytes -> call rel32 + 3 nops.
   *(BYTE*)(ADDR_CTOR_ZERO) = 0xE8;
   *(DWORD*)(ADDR_CTOR_ZERO + 1) = calc_disp32(ADDR_CTOR_ZERO + 1, (ULONG_PTR)restoreHook);
   *(BYTE*)(ADDR_CTOR_ZERO + 5) = 0x90;
   *(BYTE*)(ADDR_CTOR_ZERO + 6) = 0x90;
   *(BYTE*)(ADDR_CTOR_ZERO + 7) = 0x90;
+
+  // Menu build: same retarget idiom, so the labels are built from the restored values.
+  *(DWORD*)(ADDR_MENUBUILD_CALL + 1) = calc_disp32(ADDR_MENUBUILD_CALL + 1, (ULONG_PTR)preBuildHook);
 
   // Confirm path: retarget the existing call to us; we tail-jump to where it went.
   *(DWORD*)(ADDR_CONFIRM_CALL + 1) = calc_disp32(ADDR_CONFIRM_CALL + 1, (ULONG_PTR)saveHook);
@@ -244,8 +272,8 @@ __declspec(dllexport) void __stdcall load(void) {
   load_settings();
 
   if (patch_gamesettings()) {
-    gs_log("patched ok (ctor 0x%08X, confirm 0x%08X)%s",
-           ADDR_CTOR_ZERO, ADDR_CONFIRM_CALL,
+    gs_log("patched ok (menubuild 0x%08X, ctor 0x%08X, confirm 0x%08X)%s",
+           ADDR_MENUBUILD_CALL, ADDR_CTOR_ZERO, ADDR_CONFIRM_CALL,
            GAMESETTINGS_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
     // No dialog: a cosmetic feature must not interrupt every launch. But it must not be silent

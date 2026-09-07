@@ -177,7 +177,7 @@ jobs:
           function Has-Marker($p) {
             $b = [IO.File]::ReadAllBytes($p)
             $t = [Text.Encoding]::ASCII.GetString($b)
-            return $t.Contains('DIAGNOSTIC BUILD') -and $t.Contains('construct:')
+            return $t.Contains('DIAGNOSTIC BUILD') -and $t.Contains('write:')
           }
           if (-not (Has-Marker $diag)) { throw 'bin_diag lacks the diagnostic strings - the define did not reach cl' }
           if (Has-Marker $rel)        { throw 'bin release contains diagnostic strings - wrong build published' }
