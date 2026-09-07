@@ -541,11 +541,19 @@ is created on demand at `0x00734216` / `0x00734330`, stored at `+0x34`, and dest
   somewhere unrelated, long after the cause. (`free(NULL)` is why the constructor's NULL init is safe.)
 * Class vtable is at **`0x00B408D0`**: `[0]` destructor `0x00733E40` (body `0x00733E64`),
   `[1]` update `0x007340A4` — which confirms the menu-building/commit function is virtual method 1.
-* ❓ **Which creation site is name and which is password is NOT settled.** Site A `0x00734216` passes
-  maxlen `0x10`; site B `0x00734330` passes `4, 0, 0x0E`. 14 + the 2-char `	E` marker = the 16-wchar
-  field, which argues site B is the NAME — the opposite of what address proximity suggests, and site B's
-  extra arguments hint at a different widget configuration. **Settle this by logging both sites from a
-  diagnostic build and opening the Party Name field in game.** Guessing puts the password in the name box.
+* ✅ **SETTLED in game 2026-09-07** by a temporary probe (`feat/party-name-probe`, not for merge):
+
+  | Creation site | maxlen | Field | Stores to |
+  |---|---|---|---|
+  | **B** `0x0073432D` | `0x0E` (14) | **Party Name** | `+0x24` |
+  | **A** `0x00734213` | `0x10` (16) | **Password** | `+0x28` |
+
+  Address proximity suggested the opposite and was wrong; the maxlen argument was right. **14 + the
+  2-char `	E` marker = the 16-wchar wire field**, agreeing with `C_CreateGame_BB_C1.name` and with the
+  32-byte Ephinea blob — so the password (16, no marker) is the one WITHOUT room for a marker.
+  ⚠ Note the arena reuses the widget slot, so both widgets had the same address: the probe was
+  conclusive because of create→read ORDERING, not pointer identity. If it is ever re-run, drive the two
+  fields in a known order.
 * The stored value must include the **`	E` language marker** — see [[corellia-qol-requests]] for the
   Ephinea observation that established this.
 
