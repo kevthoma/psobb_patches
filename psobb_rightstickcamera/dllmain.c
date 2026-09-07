@@ -188,6 +188,15 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 // because someone may want a camera that drifts back on its own.
 static int g_return_speed = 0;           // RightStickReturnSpeed, degrees/second
 
+// Freeze the chase camera's remaining influence: hold the eye DISTANCE and HEIGHT at whatever they
+// were when the player took control, instead of letting the chase camera keep choosing them.
+//
+// With yaw already held absolutely, distance and height are all the chase camera still decides about
+// where the eye sits, so this turns it into a plain orbit camera around the character. What it does
+// NOT disable, deliberately: the look-at target still tracks the character (that is the part you
+// want), and the client's own wall collision and smoothing still run downstream of us.
+static int g_freeze_chase = 0;           // RightStickFreezeChase
+
 static int g_recentre_trigger = 1;       // RightStickRecentreTrigger: 0 none, 1 LT, 2 RT, 3 either
 static int g_recentre_mask    = 0;       // RightStickRecentreMask: raw XInput wButtons bitmask
 static int g_recentre_held    = 0;       // edge detection -- fire on press, not every held frame
@@ -206,6 +215,9 @@ static DWORD g_xi_rescan = 0;            // frames left before scanning slots ag
 // completely untouched, so a player who never uses the right stick gets stock behaviour.
 static float g_camera_yaw = 0.0f;        // radians, absolute
 static int   g_have_yaw   = 0;
+// Eye framing captured when control was taken, used only when g_freeze_chase is on.
+static float g_hold_h     = 0.0f;        // horizontal distance from target to eye
+static float g_hold_y     = 0.0f;        // height of the eye above the target
 static float g_pitch_offset = 0.0f;      // radians
 static DWORD g_frames = 0;
 
@@ -284,6 +296,7 @@ static void load_config(void) {
   g_invert_y    = cfg_int(buf, got, "RightStickInvertY", g_invert_y) ? 1 : 0;
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
+  g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_return_speed     = cfg_int(buf, got, "RightStickReturnSpeed", g_return_speed);
   if (g_return_speed < 0) g_return_speed = 0;
   g_recentre_trigger = cfg_int(buf, got, "RightStickRecentreTrigger", g_recentre_trigger);
@@ -524,7 +537,7 @@ static void __cdecl on_camera_updated(void) {
   vec3f* src;
   vec3f* tgt;
   float vx, vy, vz, h, r;
-  float dyaw, s, c, nx, nz, nh, ny;
+  float yaw, hh, yy, s, c, nx, nz, nh, ny;
   float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
   pad_state pad;
   float auto_yaw;
@@ -570,15 +583,16 @@ static void __cdecl on_camera_updated(void) {
     // and how fast its target is moving. If the camera still misbehaves, the cause is far more
     // likely to be visible in those three than in our offset.
     float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
-    float dist = f_sqrt(ax * ax + ay * ay + az * az);
     rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
              "menuflags=%08X | holding=%d yaw=%d/1000 pitch=%d/1000 | "
-             "auto: yaw=%d/1000 dist=%d tgtspeed=%d",
+             "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d",
              g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
              f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
              flags, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
              f_toint(g_pitch_offset * 1000.0f),
-             f_toint(f_atan2(ax, az) * 1000.0f), f_toint(dist), f_toint(g_target_move * 100.0f));
+             f_toint(f_atan2(ax, az) * 1000.0f), f_toint(f_sqrt(ax * ax + az * az)), f_toint(ay),
+             f_toint(g_target_move * 100.0f),
+             (g_freeze_chase && g_have_yaw) ? 1 : 0, f_toint(g_hold_h), f_toint(g_hold_y));
   }
 #endif
 
@@ -619,6 +633,8 @@ static void __cdecl on_camera_updated(void) {
       // engaging never produces a jump.
       if (!g_have_yaw) {
         g_camera_yaw = auto_yaw;
+        g_hold_h = h;                    // whatever framing the chase camera had chosen, kept
+        g_hold_y = vy;
         g_have_yaw = 1;
       }
       g_camera_yaw = wrap_angle(g_camera_yaw + steer_x * rate);
@@ -653,37 +669,48 @@ static void __cdecl on_camera_updated(void) {
   if (!g_have_yaw && g_pitch_offset == 0.0f)
     return;
 
-  // ⭐ ABSOLUTE, not additive. Rotate by exactly the difference between the angle we are holding and
-  // the one the chase camera just chose, so the result IS g_camera_yaw regardless of what the chase
-  // camera did this frame.
+  // ⭐ ABSOLUTE, not additive. Build the eye vector directly from the angle we are holding, so the
+  // result IS that angle regardless of what the chase camera chose this frame.
   //
   // The additive version this replaced -- a fixed offset added to the chase camera's yaw -- is
   // wrong for a camera you aim: the chase camera re-aims itself continuously as the character runs
   // and turns, so the view swung around on its own with the stick untouched. In combat that is
   // actively harmful. Holding an absolute world angle is what "rotate the camera with the right
-  // stick" actually means. Distance and height are still entirely the chase camera's to choose.
-  dyaw = g_have_yaw ? wrap_angle(g_camera_yaw - auto_yaw) : 0.0f;
+  // stick" actually means.
+  //
+  // Constructing the vector is exactly equivalent to rotating the chase camera's own vector by
+  // (held - auto), because such a rotation preserves horizontal distance and height and only sets
+  // the angle -- but written this way, freezing the framing is just a choice of which distance and
+  // height to feed in.
+  yaw = g_have_yaw ? g_camera_yaw : auto_yaw;
+  if (g_freeze_chase && g_have_yaw) {
+    hh = g_hold_h;                       // orbit at the framing we took control at
+    yy = g_hold_y;
+  } else {
+    hh = h;                              // let the chase camera keep choosing distance and height
+    yy = vy;
+  }
 
-  s = f_sin(dyaw);
-  c = f_cos(dyaw);
-  nx = vx * c + vz * s;
-  nz = -vx * s + vz * c;
+  nx = hh * f_sin(yaw);
+  nz = hh * f_cos(yaw);
+  ny = yy;
 
-  // Pitch: the same rotation applied to the (horizontal distance, height) pair, then folded back
-  // into x/z by scaling. Doing it this way needs no asin -- only the sqrt above.
-  ny = vy;
-  if (g_pitch_offset != 0.0f && h > 0.0f) {
+  // Pitch: rotate the (horizontal distance, height) pair, then fold the result back into x/z by
+  // scaling. Doing it this way needs no asin -- only the sqrt above.
+  if (g_pitch_offset != 0.0f && hh > 0.0f) {
+    float rr = f_sqrt(hh * hh + yy * yy);
+
     s = f_sin(g_pitch_offset);
     c = f_cos(g_pitch_offset);
-    nh = h * c - vy * s;
-    ny = h * s + vy * c;
+    nh = hh * c - yy * s;
+    ny = hh * s + yy * c;
     // Refuse to pass the hard limit or to cross the axis. The accumulator clamp bounds only OUR
     // contribution; the chase camera's own pitch rides underneath it, so the total needs its own
     // stop. Rejecting the whole pitch step leaves yaw working, which is the half players notice.
-    if (nh <= 0.0f || f_abs(ny) > PITCH_SIN_LIMIT * r) {
-      ny = vy;
+    if (nh <= 0.0f || f_abs(ny) > PITCH_SIN_LIMIT * rr) {
+      ny = yy;
     } else {
-      float k = nh / h;
+      float k = nh / hh;
       nx *= k;
       nz *= k;
     }
@@ -753,9 +780,10 @@ __declspec(dllexport) void __stdcall load(void) {
 
   if (patch_camera()) {
     rsc_log("patched ok (call %08X -> hook) sens=%d%% deadzone=%d%% pitch=%s invX=%d invY=%d "
-            "return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X xinput=%s%s",
+            "freeze=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X xinput=%s%s",
             ADDR_UPDATE_CALL, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_return_speed, g_recentre_trigger, g_recentre_mask, g_suppress,
+            g_invert_x, g_invert_y, g_freeze_chase, g_return_speed, g_recentre_trigger,
+            g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
