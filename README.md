@@ -72,6 +72,9 @@ Settings live in `widescreen.cfg`:
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
 | `RightStickPitch` | `1` | Allow vertical look. `0` leaves height entirely to the game. |
 | `RightStickAxisYaw` / `RightStickAxisPitch` | `0x14` / `0x08` | `DIJOYSTATE2` axis offsets — see below. |
-| `RightStickSuppressMask` | `0x82C` | Menu-state bits that mean "leave the camera alone". |
+| `RightStickAxisCentre` | `32768` | Where a resting axis sits. The axes arrive in DirectInput's default **unsigned** `0..65535` range, not signed. |
+| `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
 
-The last two rows exist because two things cannot be determined by reading the binary: which axes the pad lands on (ours is Xidi's virtual device, not the physical controller) and exactly which menu states should suppress the camera. The defaults are the documented ones; a diagnostic build logs all six axes and the live menu mask to `corellia_rightstickcamera.log`, which settles both in one session.
+The axis rows exist because the pad is Xidi's virtual device, not the physical controller, so a different mapper would land elsewhere. The defaults are measured, not assumed: on this client the right stick is on `Z`/`Rz` and a resting axis reads ~32768. A diagnostic build logs all six axes and the live menu mask to `corellia_rightstickcamera.log` if a different setup needs re-checking.
+
+With no controller attached the plugin does nothing — an unread `g_joyState` is all zeroes, which is not a stick position.

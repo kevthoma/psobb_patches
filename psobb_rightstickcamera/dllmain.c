@@ -71,26 +71,33 @@
 #define DIJ_LRY             0x10
 #define DIJ_LRZ             0x14
 
-// ⚠ UNCONFIRMED IN GAME -- the one thing that could not be settled statically.
-// Which axes carry the right stick depends on the DirectInput device, and ours is Xidi's virtual
-// pad (Mapper Type = StandardGamepad), not the physical controller. These defaults follow the
-// psobb.io input notes for this exact game (lZ = right stick vertical, lRz = right stick
-// horizontal). If the stick turns out to be on Rx/Ry instead, no rebuild is needed: set
-// RightStickAxisYaw / RightStickAxisPitch in widescreen.cfg to the offsets above. A diagnostic
-// build logs all six axes periodically, which settles it in one launch.
+// ✅ CONFIRMED IN GAME 2026-09-07. The right stick is on Z and Rz: those are the two axes that move
+// when it does (Z 32714 -> 32560, Rz 32846 -> 32917), while X/Y sit at exactly 32767 and the unused
+// Rx/Ry sit at 0. Still config keys, because the device is Xidi's virtual pad
+// (Mapper Type = StandardGamepad) and a different mapper would land elsewhere.
 #define DEFAULT_AXIS_YAW    DIJ_LRZ
 #define DEFAULT_AXIS_PITCH  DIJ_LZ
 
-// Axis full scale. Xidi reports the standard signed 16-bit range; the client's own menu code
-// compares against 4096.0f (@0x0098B350), i.e. 12.5% of this, which corroborates it.
-#define AXIS_FULL_SCALE     32767.0f
+// ⚠ Axis range is UNSIGNED 0..65535 with the centre near 32768 -- NOT signed +/-32767.
+// Measured in game 2026-09-07: a resting pad reads X=32767 Y=32767 Z=32714 Rz=32846. PSOBB never
+// calls SetProperty(DIPROP_RANGE), so the axes arrive in DirectInput's DEFAULT range, which is
+// unsigned. Reading them as signed treats a centred stick as full deflection, which is exactly the
+// runaway spin the first build produced. The client's own 4096.0f threshold (@0x0098B350) is a
+// FRAME DELTA, not an absolute position, so it does not contradict this.
+#define AXIS_CENTRE         32768.0f
+#define AXIS_HALF_SCALE     32768.0f
 
-// ⚠ ALSO UNCONFIRMED -- bits of g_GenericMenuSubSelection that mean "leave the camera alone".
-// 0x0C selects the branch in 0x004D1FF4 that snaps current to desired (cutscene / teleport), and
-// 0x820 is the mask the update itself tests to skip collision and smoothing entirely. Suppressing
-// on both is the conservative reading. Tunable rather than compiled in, because the exact meanings
-// are inferred from control flow, not observed: a diagnostic build logs the live mask.
-#define DEFAULT_SUPPRESS    0x82C
+// Bits of g_GenericMenuSubSelection that mean "leave the camera alone".
+//
+// 0x820 is the mask the camera update itself tests to skip collision and smoothing entirely, so it
+// is the client's own statement of "hands off".
+//
+// ⚠ This was 0x82C in the first build, which also suppressed on 0x0C. That was wrong. 0x0C merely
+// selects the branch inside 0x004D1FF4 that writes the CURRENT points as well as the desired ones;
+// it does not mean the camera is off limits. Measured in game 2026-09-07, bit 0x4 is set during
+// ordinary play (live masks: 0x604, 0x204, 0x600), so 0x82C disabled the feature most of the time.
+// Still a config key: if cutscenes turn out to need protecting, bits go back without a rebuild.
+#define DEFAULT_SUPPRESS    0x820
 
 // Degrees per frame at full stick deflection, before RightStickSensitivity scales it. The camera
 // update runs once per frame and the client targets 30fps, so 3.0 is 90 degrees/second.
@@ -136,6 +143,10 @@ static int g_allow_pitch = 1;            // RightStickPitch
 static int g_axis_yaw    = DEFAULT_AXIS_YAW;
 static int g_axis_pitch  = DEFAULT_AXIS_PITCH;
 static int g_suppress    = DEFAULT_SUPPRESS;
+// Where a resting axis sits. 32768 is DirectInput's default-range centre and is what this client's
+// pad actually reports; exposed only so a device that really does report signed axes (centre 0) can
+// be accommodated without a rebuild.
+static float g_axis_centre = AXIS_CENTRE;
 
 // Accumulated offset from wherever the auto-camera would have put the eye. Persisted only in
 // memory: a camera angle is not worth a file, and starting each session centred is the behaviour
@@ -221,6 +232,7 @@ static void load_config(void) {
   g_axis_yaw    = cfg_int(buf, got, "RightStickAxisYaw", g_axis_yaw);
   g_axis_pitch  = cfg_int(buf, got, "RightStickAxisPitch", g_axis_pitch);
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
+  g_axis_centre = (float)cfg_int(buf, got, "RightStickAxisCentre", (int)AXIS_CENTRE);
 
   // A nonsense axis offset would read outside the 0x110-byte joystick buffer. Clamp to the six
   // documented axis slots rather than trusting a hand-edited config.
@@ -298,11 +310,27 @@ static float wrap_angle(float a) {
   return a;
 }
 
-// One axis, normalised to -1..1 with the deadzone removed and rescaled so the first movement past
-// the deadzone starts from zero rather than jumping.
+// ⚠ Is there actually a pad, and has it been read yet?
+//
+// Two states produce an all-zero axis block: the frames before Xidi first fills g_joyState (seen in
+// the very first log lines), and a player with no controller at all -- for whom it is permanent.
+// Since a centred axis reads ~32768, treating zero as a position would peg the stick to full
+// deflection and spin the camera forever. For the keyboard-only player that would be a permanently
+// broken camera with no way to guess why, so this is a correctness guard, not a nicety.
+//
+// An unused axis rests at 0 while a used one rests at centre (measured: Rx=Ry=0, X=Y=32767), so
+// "every axis is exactly zero" cannot happen once a pad is live -- it is unambiguous.
+static int joystick_ready(void) {
+  return *(long*)(ADDR_JOYSTATE + DIJ_LX)  || *(long*)(ADDR_JOYSTATE + DIJ_LY)
+      || *(long*)(ADDR_JOYSTATE + DIJ_LZ)  || *(long*)(ADDR_JOYSTATE + DIJ_LRX)
+      || *(long*)(ADDR_JOYSTATE + DIJ_LRY) || *(long*)(ADDR_JOYSTATE + DIJ_LRZ);
+}
+
+// One axis, normalised to -1..1 about the centre, with the deadzone removed and rescaled so the
+// first movement past the deadzone starts from zero rather than jumping.
 static float read_axis(int off, int invert) {
   long raw = *(long*)(ADDR_JOYSTATE + off);
-  float v = (float)raw / AXIS_FULL_SCALE;
+  float v = ((float)raw - g_axis_centre) / AXIS_HALF_SCALE;
   float dz = (float)g_deadzone / 100.0f;
   float sign, mag;
 
@@ -341,10 +369,11 @@ static void __cdecl on_camera_updated(void) {
   if ((g_frames % RSC_DIAG_EVERY) == 0) {
     // The two unknowns, side by side: every axis (to find the right stick) and the live menu mask
     // (to find the bits that mean "hands off"). Both are single-launch questions.
-    rsc_diag("axes X=%d Y=%d Z=%d Rx=%d Ry=%d Rz=%d | menuflags=%08X | yaw=%d/1000 pitch=%d/1000",
+    rsc_diag("axes X=%d Y=%d Z=%d Rx=%d Ry=%d Rz=%d | ready=%d | menuflags=%08X | yaw=%d/1000 pitch=%d/1000",
              *(long*)(ADDR_JOYSTATE + DIJ_LX),  *(long*)(ADDR_JOYSTATE + DIJ_LY),
              *(long*)(ADDR_JOYSTATE + DIJ_LZ),  *(long*)(ADDR_JOYSTATE + DIJ_LRX),
              *(long*)(ADDR_JOYSTATE + DIJ_LRY), *(long*)(ADDR_JOYSTATE + DIJ_LRZ),
+             joystick_ready() ? 1 : 0,
              flags, f_toint(g_yaw_offset * 1000.0f), f_toint(g_pitch_offset * 1000.0f));
   }
 #endif
@@ -358,16 +387,20 @@ static void __cdecl on_camera_updated(void) {
     return;
   }
 
-  dyaw = read_axis(g_axis_yaw, g_invert_x) * BASE_DEGREES * DEG2RAD
-         * ((float)g_sensitivity / 100.0f);
-  g_yaw_offset = wrap_angle(g_yaw_offset + dyaw);
+  // Accumulate only when there is a pad to read. With none, the offset simply holds where it is --
+  // that is "no new input", not "recentre the camera".
+  if (joystick_ready()) {
+    dyaw = read_axis(g_axis_yaw, g_invert_x) * BASE_DEGREES * DEG2RAD
+           * ((float)g_sensitivity / 100.0f);
+    g_yaw_offset = wrap_angle(g_yaw_offset + dyaw);
 
-  if (g_allow_pitch) {
-    dpitch = read_axis(g_axis_pitch, g_invert_y) * BASE_DEGREES * DEG2RAD
-             * ((float)g_sensitivity / 100.0f);
-    g_pitch_offset += dpitch;
-    if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
-    if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
+    if (g_allow_pitch) {
+      dpitch = read_axis(g_axis_pitch, g_invert_y) * BASE_DEGREES * DEG2RAD
+               * ((float)g_sensitivity / 100.0f);
+      g_pitch_offset += dpitch;
+      if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
+      if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
+    }
   }
 
   if (g_yaw_offset == 0.0f && g_pitch_offset == 0.0f)
@@ -475,9 +508,9 @@ __declspec(dllexport) void __stdcall load(void) {
 
   if (patch_camera()) {
     rsc_log("patched ok (call %08X -> hook) sens=%d%% deadzone=%d%% pitch=%s invX=%d invY=%d "
-            "axes yaw=+0x%02X pitch=+0x%02X suppress=%03X%s",
+            "axes yaw=+0x%02X pitch=+0x%02X centre=%d suppress=%03X%s",
             ADDR_UPDATE_CALL, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_axis_yaw, g_axis_pitch, g_suppress,
+            g_invert_x, g_invert_y, g_axis_yaw, g_axis_pitch, f_toint(g_axis_centre), g_suppress,
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
     // No dialog: a camera feature must not interrupt every launch. But it must not be silent
