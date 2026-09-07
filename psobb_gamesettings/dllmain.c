@@ -567,8 +567,11 @@ __declspec(dllexport) void __stdcall load(void) {
   load_settings();
 
   if (patch_gamesettings()) {
-    gs_log("patched ok (menubuild 0x%08X, ctor 0x%08X, label 0x%08X, confirm 0x%08X)%s",
+    // All six sites, not four -- a line that undercounts what was patched is the kind of thing that
+    // misleads whoever reads it next.
+    gs_log("patched ok (menubuild %08X, ctor %08X, label %08X, confirm %08X, name %08X, pw %08X)%s",
            ADDR_MENUBUILD_CALL, ADDR_CTOR_ZERO, ADDR_MODE_LABEL_ARG, ADDR_CONFIRM_CALL,
+           ADDR_CREATE_NAME, ADDR_CREATE_PW,
            GAMESETTINGS_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
     // No dialog: a cosmetic feature must not interrupt every launch. But it must not be silent
