@@ -71,7 +71,7 @@ Settings live in `widescreen.cfg`:
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
 | `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
-| `RightStickFreezeChase` | `0` | Also hold the eye **distance and height** while you are steering, turning it into a plain orbit camera. |
+| `RightStickFreezeChase` | `1` | Hold the eye **distance and height** while you are steering, turning it into a plain orbit camera. |
 | `RightStickReturnSpeed` | `0` | Degrees/second the camera drifts back behind you while moving. `0` (default) holds the angle you set. |
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
@@ -92,12 +92,15 @@ character with the other. An earlier build added a fixed *offset* to the chase c
 which meant the view swung around on its own as the chase camera re-aimed itself — mildly odd while
 exploring, actively harmful in combat.
 
-`RightStickFreezeChase=1` goes further and takes the chase camera out of the picture almost
-entirely: once you take control, the eye holds the distance and height it had at that moment, so the
-camera simply orbits your character. Note what this does **not** turn off, deliberately — the look-at
-point still tracks your character, and the client's own wall collision and camera smoothing still run
-downstream. Those are the parts of the chase camera worth keeping; what it varies continuously is
-distance and height, and that is what this freezes.
+`RightStickFreezeChase` (on by default) takes the chase camera out of the picture almost entirely:
+once you take control, the eye holds the distance and height it had at that moment, so the camera
+simply orbits your character. Measured over a play session, the chase camera moves the eye's height
+barely at all (6–8 units) but swings its distance from 19 to 77 — that constant push-and-pull is
+what makes the camera feel like it is fighting you, and this is what stops it.
+
+Note what it does **not** turn off, deliberately: the look-at point still tracks your character, and
+the client's own wall collision and camera smoothing still run downstream. Those are the parts of the
+chase camera worth keeping.
 
 `RightStickReturnSpeed` makes the held angle drift back toward the chase camera's while you move.
 It is **off by default** for the same reason: it fights both the player and the chase camera to undo

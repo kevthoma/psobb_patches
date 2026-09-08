@@ -168,12 +168,11 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 // it the recentre lands somewhere arbitrary. Zero the offset on the same press and it lands where
 // the player expects.
 //
-// ⚠ Which XInput control that is cannot be read off the client: PSO sees Xidi's virtual DirectInput
-// pad, and "PAD BUTTON7" is a Xidi mapper index, not an XInput button. Under StandardGamepad the
-// numbering puts the triggers at 7 and 8, which fits PSO's defaults exactly (Prev Page/Camera =
-// BUTTON7, Next Page = BUTTON8 -- i.e. the shoulder triggers page through). Hence left trigger as
-// the default. A diagnostic build logs the raw button word and both triggers, so if it is wrong the
-// log names the right one and it is a config line, not a rebuild.
+// ✅ CONFIRMED left trigger (2026-09-07): all 56 recentre presses in a play session logged lt=255.
+// It could not be read off the client -- PSO sees Xidi's virtual DirectInput pad, so "PAD BUTTON7"
+// is a Xidi mapper index, not an XInput button -- but StandardGamepad puts the triggers at 7 and 8,
+// which fits PSO's defaults exactly (Prev Page/Camera = BUTTON7, Next Page = BUTTON8, i.e. the
+// shoulders page through). Still config keys: a different mapper would land elsewhere.
 // Automatic return to centre WHILE MOVING, in degrees/second. 0 holds the offset indefinitely,
 // which was the original behaviour.
 //
@@ -195,7 +194,11 @@ static int g_return_speed = 0;           // RightStickReturnSpeed, degrees/secon
 // where the eye sits, so this turns it into a plain orbit camera around the character. What it does
 // NOT disable, deliberately: the look-at target still tracks the character (that is the part you
 // want), and the client's own wall collision and smoothing still run downstream of us.
-static int g_freeze_chase = 0;           // RightStickFreezeChase
+// ✅ ON by default, from measurement. Over 81 in-game samples the chase camera moved the eye's
+// HEIGHT almost not at all (6..8) while swinging its DISTANCE from 19 to 77 -- a 4x spread, and up
+// to 45 units away from what the player had framed. That constant push-and-pull is what made the
+// camera feel like it was fighting back; holding the framing is what stopped it.
+static int g_freeze_chase = 1;           // RightStickFreezeChase
 
 static int g_recentre_trigger = 1;       // RightStickRecentreTrigger: 0 none, 1 LT, 2 RT, 3 either
 static int g_recentre_mask    = 0;       // RightStickRecentreMask: raw XInput wButtons bitmask
