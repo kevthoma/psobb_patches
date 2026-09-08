@@ -82,8 +82,11 @@ pitch the two end up solving for height at the same time and it reads oddly in p
 `RightStickPitch=1` to try it.
 
 **The Pad Button Config screen reflects it.** While the camera is enabled, the two **Right Analog**
-rows read `-- Camera --` instead of their bindings, because whatever they are bound to is not
-reaching the game. Turning the feature off restores them.
+rows are greyed out, lose their selection cursor, and read `-- Camera --` instead of their bindings —
+because whatever they are bound to is not reaching the game. Turning the feature off restores them.
+
+The greying is the client's own mechanism, not an invented one: it is exactly what the game does to
+disable a menu entry elsewhere (colour `0xFF909090`, and the item's cursor bit cleared).
 
 Nothing is written to your key config. The bindings are left exactly as you set them — which matters
 on Blue Burst, where that config syncs to the server, so clearing it would persist after you switched

@@ -67,6 +67,27 @@
 
 // Which rows are the right analog axes. Row order is the menu's own: 0 Move L/R, 1 Move F/B,
 // 2 Right Analog L/R, 3 Right Analog F/B, then the buttons. Confirmed against the in-game screen.
+// Greying a row out, using the client's OWN mechanism rather than an invented one.
+// ChatShortcutMenuYesNoWindow_SetItemColorById @ 0x00738A9C is how the client disables a menu entry:
+//
+//   *(u32*)(item + 0x24) = 0xFF909090;   // grey
+//   *(u16*)(item + 4)   &= 0xFFFE;       // clear bit 0
+//
+// Both halves are corroborated by ListWindowObject_AddListItem @ 0x00735C90, which initialises
+// +0x24 to 0xFFFFFFFF (so +0x24 is the colour) and sets bit 0 of the same flags word when the
+// caller passes has_cursor (so bit 0 is the cursor/selectable bit).
+//
+// We replicate it inline rather than calling 0x00738A9C, because that function also requires bit 2
+// of the flags word to be set and it is not known whether the pad config's rows have it -- a
+// precondition that fails silently is worse than three field writes.
+#define LIST_LINES_PTR      0x28         // list window -> array of line objects
+#define LIST_NUM_LINES      0x8A         // short
+#define ITEM_FLAGS          0x04         // ushort; bit 0 = has cursor / selectable
+#define ITEM_VALUE          0x18         // the item_index passed to AddListItem
+#define ITEM_COLOR          0x24         // ARGB, 0xFFFFFFFF when added
+#define ITEM_GREY           0xFF909090   // the client's own disabled grey
+#define OFF_MENU_LIST       0x24         // menu object -> the 16-row list window
+
 #define PAD_ROW_RSTICK_X    2
 #define PAD_ROW_RSTICK_Y    3
 
@@ -579,9 +600,11 @@ static void release_camera(void) {
 // ---------------------------------------------------------------------------
 // Pad Button Config: show the right analog rows as taken, while the camera owns them
 //
-// The client has no notion of a disabled menu row -- nothing in it greys one out or makes the cursor
-// skip one -- so rather than invent that, the two rows report what is actually true: the right stick
-// is driving the camera, so whatever they are bound to is not reaching the game.
+// While the camera owns the right stick, the two Right Analog rows are greyed out, lose their
+// cursor, and report what has taken them. Whatever they are bound to is not reaching the game, so
+// showing them as live bindings is a lie.
+//
+// The greying is the client's OWN mechanism, not an invented one -- see ITEM_COLOR/ITEM_FLAGS above.
 //
 // Nothing is written to the character's key config. The bindings are left exactly as the player set
 // them, which matters because on Blue Burst that config syncs to the server: clearing it would
@@ -601,12 +624,47 @@ static void pad_row_set_text(void* widget, const wchar_t* text) {
   }
 }
 
-static void __cdecl on_pad_row(void* widget, int row) {
+// Grey a text object and take its cursor away, exactly as 0x00738A9C does.
+static void grey_item(BYTE* item) {
+  if (!item)
+    return;
+  *(DWORD*)(item + ITEM_COLOR) = ITEM_GREY;
+  *(WORD*)(item + ITEM_FLAGS) = (WORD)(*(WORD*)(item + ITEM_FLAGS) & 0xFFFE);
+}
+
+// The left-hand column is a list item, found by the value AddListItem was given -- which for this
+// menu is the row index.
+static void grey_list_row(BYTE* list, int value) {
+  BYTE** lines;
+  int n, i;
+
+  if (!list)
+    return;
+  lines = *(BYTE***)(list + LIST_LINES_PTR);
+  n = (int)*(short*)(list + LIST_NUM_LINES);
+  if (!lines || n <= 0 || n > 256)
+    return;                              // not the shape we expect: do nothing rather than scribble
+  for (i = 0; i < n; i++) {
+    BYTE* item = lines[i];
+    if (item && *(int*)(item + ITEM_VALUE) == value)
+      grey_item(item);
+  }
+}
+
+static void __cdecl on_pad_row(void* widget, int row, void* menu) {
   if (!g_enabled || !widget)
     return;                              // classic controls: leave the menu exactly as it was
   if (row != PAD_ROW_RSTICK_X && row != PAD_ROW_RSTICK_Y)
     return;
+
+  // Right-hand column: say what has taken the binding, and grey it.
   pad_row_set_text(widget, RSC_ROW_TEXT);
+  grey_item((BYTE*)widget);
+
+  // Left-hand column: grey the row name and drop its cursor, so it reads as unavailable and the
+  // selection no longer highlights it.
+  if (menu)
+    grey_list_row(*(BYTE**)((BYTE*)menu + OFF_MENU_LIST), row);
 }
 
 // Replaces `call 0x0072E0E4`. ECX is the row's text widget and EBX the row index; both survive
@@ -614,10 +672,11 @@ static void __cdecl on_pad_row(void* widget, int row) {
 void __declspec(naked) padRowHook(void) {
   __asm {
     pushad
+    push esi                                             // the menu object (rows are esi+row*4+0x2C)
     push ebx                                             // row index
     push ecx                                             // this row's text widget
     call on_pad_row
-    add  esp, 8
+    add  esp, 0xC
     popad
     mov  eax, ADDR_TEXT_SPACE
     jmp  eax
