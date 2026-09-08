@@ -403,6 +403,8 @@ namespace Corellia
         readonly List<int> offeredModes = new List<int>();
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin,
                  cbRememberParty;
+        bool soundHidden;        // running under Proton: the sliders drive a proxy that is not there
+        int soundShift;
         TrackBar tbMaster, tbMusic, tbEffects;
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
@@ -481,6 +483,23 @@ namespace Corellia
 
         [DllImport("user32.dll", CharSet = CharSet.Ansi)]
         static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
+        static extern IntPtr GetModuleHandleA(string name);
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
+        static extern IntPtr GetProcAddress(IntPtr module, string proc);
+
+        // Wine (and therefore Proton) exports wine_get_version from ntdll; Windows does not. This is
+        // the conventional check and does not depend on a version string or an environment variable.
+        static bool RunningUnderWine()
+        {
+            try
+            {
+                IntPtr ntdll = GetModuleHandleA("ntdll.dll");
+                return ntdll != IntPtr.Zero && GetProcAddress(ntdll, "wine_get_version") != IntPtr.Zero;
+            }
+            catch { return false; }   // if the probe itself fails, assume Windows and show everything
+        }
 
         // In-game font, stored as the game's own FONT_JPN registry string. "System" is a Windows
         // alias that always resolves, so it is both the default and the safe fallback; the rest are
@@ -645,7 +664,23 @@ namespace Corellia
                                              Location = new Point(24, 538), AutoSize = true };
             Controls.Add(cbRememberParty);
 
+            // On the Deck the sound sliders drive a proxy that is not there, so hide them rather
+            // than offer controls that quietly do nothing. Measured from the layout instead of a
+            // hardcoded number, so moving the groups around cannot silently leave a hole.
+            if (RunningUnderWine())
+            {
+                int shift = gSound.Height + (gSound.Top - (gSharp.Top + gSharp.Height));
+                gSound.Visible = false;
+                foreach (var c in new Control[] { cbController, cbSaveLogin, cbRememberParty })
+                    c.Location = new Point(c.Location.X, c.Location.Y - shift);
+                ClientSize = new Size(ClientSize.Width, ClientSize.Height - shift);
+                soundHidden = true;
+                soundShift = shift;
+            }
+
             var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 568), Size = new Size(130, 44) };
+            if (soundHidden)
+                btnSave.Location = new Point(btnSave.Location.X, btnSave.Location.Y - soundShift);
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -847,9 +882,15 @@ namespace Corellia
             SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.25");
             SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
             SetKey(lines, "RememberPartyInfo", cbRememberParty.Checked ? "1" : "0");
-            SetKey(lines, "MasterVolume", tbMaster.Value.ToString());
-            SetKey(lines, "MusicVolume", tbMusic.Value.ToString());
-            SetKey(lines, "EffectVolume", tbEffects.Value.ToString());
+            // Not written when the group was hidden: the values were never shown, so saving them
+            // would silently rewrite whatever the file already held on behalf of a control the
+            // player could not see.
+            if (!soundHidden)
+            {
+                SetKey(lines, "MasterVolume", tbMaster.Value.ToString());
+                SetKey(lines, "MusicVolume", tbMusic.Value.ToString());
+                SetKey(lines, "EffectVolume", tbEffects.Value.ToString());
+            }
             // HUD scaling is entangled with the widescreen layout math in the wrapper (non-1.0
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
             SetKey(lines, "HUDScale", "1.0");
