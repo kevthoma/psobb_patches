@@ -284,6 +284,22 @@ static int g_chase_mode  = CHASE_HYBRID; // ChaseCam
 // distance dynamic: their character visibly changes on-screen size, and drifts around the frame
 // rather than being welded to its centre. So the untested combination is this ON with
 // RightStickFreezeChase OFF, which is what their Disabled mode actually looks like.
+// ⭐ How far the held angle may sit from directly behind the character, in degrees. 180 = no limit.
+//
+// This is a different mechanism from RightStickReturnSpeed, and a better fit for what PSO is:
+// inside the cone NOTHING pulls at the camera, so there is no drift to fight. Only at the edge does
+// the character's own turning drag the camera along -- so it always ends up following eventually,
+// without ever tugging while you are aiming.
+//
+// Why a limit exists at all: with the camera in FRONT of the character, three things go wrong at
+// once. Movement is camera-relative, so forward walks you toward the camera. Your own character
+// occludes what you are attacking. And the audio listener is camera-relative -- PSO uses DS3D
+// positional buffers, so combat audio audibly muffles when the enemy ends up far from the camera
+// (observed in game 2026-09-08). None of that is fixable by tuning a rate; the camera simply should
+// not go there.
+#define DEFAULT_YAW_LIMIT   120
+static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
+
 static int g_always_engaged = 0;         // RightStickAlwaysEngaged
 
 static int g_freeze_chase = 1;           // RightStickFreezeChase
@@ -421,6 +437,9 @@ static void load_config(void) {
 
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
+  g_yaw_limit        = cfg_int(buf, got, "RightStickYawLimit", g_yaw_limit);
+  if (g_yaw_limit < 10) g_yaw_limit = 10;
+  if (g_yaw_limit > 180) g_yaw_limit = 180;
   g_return_speed     = cfg_int(buf, got, "RightStickReturnSpeed", g_return_speed);
   if (g_return_speed < 0) g_return_speed = 0;
   g_recentre_trigger = cfg_int(buf, got, "RightStickRecentreTrigger", g_recentre_trigger);
@@ -928,6 +947,19 @@ static void __cdecl on_camera_updated(void) {
   if (!g_have_yaw && g_pitch_offset == 0.0f)
     return;
 
+  // Drag the held angle along once it falls outside the cone. Applied AFTER steering and drift, and
+  // every frame -- so as the character turns, an angle sitting at the edge is carried with them,
+  // while anything inside the cone is left completely alone.
+  if (g_have_yaw && g_yaw_limit < 180) {
+    float lim = (float)g_yaw_limit * DEG2RAD;
+    float off = wrap_angle(g_camera_yaw - auto_yaw);
+
+    if (off > lim)
+      g_camera_yaw = wrap_angle(auto_yaw + lim);
+    else if (off < -lim)
+      g_camera_yaw = wrap_angle(auto_yaw - lim);
+  }
+
   // ⭐ ABSOLUTE, not additive. Build the eye vector directly from the angle we are holding, so the
   // result IS that angle regardless of what the chase camera chose this frame.
   //
@@ -1071,11 +1103,11 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[3] = { "enabled", "hybrid", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d freeze=%d always=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_freeze_chase, g_always_engaged, g_return_speed, g_recentre_trigger,
+            g_invert_x, g_invert_y, g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
