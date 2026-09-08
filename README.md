@@ -72,7 +72,8 @@ Settings live in `widescreen.cfg`:
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
 | `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
 | `RightStickFreezeChase` | `1` | Hold the eye **distance and height** while you are steering, turning it into a plain orbit camera. |
-| `RightStickReturnSpeed` | `0` | Degrees/second the camera drifts back behind you while moving. `0` (default) holds the angle you set. |
+| `RightStickReturnSpeed` | `25` | Degrees/second the camera drifts back behind you **while moving**. `0` holds the angle indefinitely. |
+| `RightStickAlwaysEngaged` | `0` | Take the camera immediately instead of on first stick touch. |
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
@@ -119,9 +120,15 @@ Note what it does **not** turn off, deliberately: the look-at point still tracks
 the client's own wall collision and camera smoothing still run downstream. Those are the parts of the
 chase camera worth keeping.
 
-`RightStickReturnSpeed` makes the held angle drift back toward the chase camera's while you move.
-It is **off by default** for the same reason: it fights both the player and the chase camera to undo
-the thing the feature exists to do.
+`RightStickReturnSpeed` eases the held angle back behind you while you move, then hands the camera
+to the chase cam once it arrives. It holds while you stand still, so looking around stationary works.
+The default of 25°/s takes roughly 3–4 seconds to recover a 90° turn — matching the feel of Ephinea's
+"Chase Cam: Hybrid". An earlier build shipped this at 90°/s, which was fast enough to fight the
+player; the idea was sound, the rate was not. `0` disables the drift entirely.
+
+`RightStickAlwaysEngaged=1` takes the camera on the first frame rather than waiting for you to touch
+the stick, and re-frames on area changes. Combined with `RightStickFreezeChase=0` this approximates
+Ephinea's "Chase Cam: Disabled" — a fixed world angle with the framing still chosen by the game.
 
 **Recentring** hangs off the client's own Camera binding (`PAD BUTTON7` in the default pad config).
 Because the offset is added on top of the chase camera, a recentre that does not also clear the

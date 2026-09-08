@@ -227,11 +227,16 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 // things" as you run. Standing still it is fine -- and looking around while stationary is the case
 // where holding the offset is exactly what the player wants. So: decay while moving, hold while
 // still, and never decay while the player is actively steering.
-// ⚠ OFF by default. Tried at 90 deg/s and it is actively harmful in combat: the whole point of a
-// right-stick camera is to aim the view with one thumb while positioning the character with the
-// other, and a decay fights both the player and the chase camera to undo exactly that. Kept only
-// because someone may want a camera that drifts back on its own.
-static int g_return_speed = 0;           // RightStickReturnSpeed, degrees/second
+// Drift back behind the character while moving, in degrees/second. 0 holds the angle indefinitely.
+//
+// 📏 Calibrated against Ephinea's "Chase Cam: Hybrid" (observed 2026-09-08): after releasing the
+// stick, their camera takes 3-5 seconds to swing back behind you from roughly 90 degrees off, i.e.
+// about 20-30 deg/s. The first attempt here shipped 90 deg/s -- three to four times too fast -- and
+// that is why it read as fighting the player rather than helping. The idea was fine; the rate was
+// not. Their drift also does NOT run while standing still (nine seconds of observed idle, camera
+// perfectly static), which is the rule this already implements.
+#define BASE_RETURN_SPEED   25
+static int g_return_speed = BASE_RETURN_SPEED;   // RightStickReturnSpeed, degrees/second
 
 // Freeze the chase camera's remaining influence: hold the eye DISTANCE and HEIGHT at whatever they
 // were when the player took control, instead of letting the chase camera keep choosing them.
@@ -244,6 +249,16 @@ static int g_return_speed = 0;           // RightStickReturnSpeed, degrees/secon
 // HEIGHT almost not at all (6..8) while swinging its DISTANCE from 19 to 77 -- a 4x spread, and up
 // to 45 units away from what the player had framed. That constant push-and-pull is what made the
 // camera feel like it was fighting back; holding the framing is what stopped it.
+// Take the camera on the first frame and keep it, instead of waiting for the player to touch the
+// right stick. OFF by default.
+//
+// ⚠ Tried once as the DEFAULT and rejected as "objectively worse" -- but that attempt also FROZE the
+// framing, and observation of Ephinea's "Chase Cam: Disabled" (2026-09-08) shows theirs keeps the
+// distance dynamic: their character visibly changes on-screen size, and drifts around the frame
+// rather than being welded to its centre. So the untested combination is this ON with
+// RightStickFreezeChase OFF, which is what their Disabled mode actually looks like.
+static int g_always_engaged = 0;         // RightStickAlwaysEngaged
+
 static int g_freeze_chase = 1;           // RightStickFreezeChase
 
 static int g_recentre_trigger = 1;       // RightStickRecentreTrigger: 0 none, 1 LT, 2 RT, 3 either
@@ -269,6 +284,14 @@ static float g_hold_h     = 0.0f;        // horizontal distance from target to e
 static float g_hold_y     = 0.0f;        // height of the eye above the target
 static float g_pitch_offset = 0.0f;      // radians
 static DWORD g_frames = 0;
+
+// Previous frame's look-at point. Only consulted when g_always_engaged is on: holding an angle
+// indefinitely means noticing when the framing has gone stale, or the lobby's framing follows you
+// into a dungeon. A one-frame jump above WARP_UNITS is a teleport, area change or respawn.
+// 📏 Running measures about 1.5 units/frame in our own logs, so 100 is ~60x clear of it.
+#define WARP_UNITS          100.0f
+static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
+static int   g_have_prev_target = 0;
 
 // Last-seen write time of widescreen.cfg, for live config reloads.
 static FILETIME g_cfg_mtime = { 0, 0 };
@@ -350,6 +373,7 @@ static void load_config(void) {
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
+  g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
   g_return_speed     = cfg_int(buf, got, "RightStickReturnSpeed", g_return_speed);
   if (g_return_speed < 0) g_return_speed = 0;
   g_recentre_trigger = cfg_int(buf, got, "RightStickRecentreTrigger", g_recentre_trigger);
@@ -592,6 +616,14 @@ static float shape_axis(float v, int invert) {
 // Hand the camera back to the client. Used by the recentre control, by the suppressed states, and
 // by the optional drift-back once it arrives -- all of which mean the same thing: stop holding an
 // angle, and let the chase camera do exactly what it would have done without this plugin.
+// Take the camera at the angle and framing the client currently has, so taking over is invisible.
+static void engage_camera(float auto_yaw, float h, float vy) {
+  g_camera_yaw = auto_yaw;
+  g_hold_h = h;
+  g_hold_y = vy;
+  g_have_yaw = 1;
+}
+
 static void release_camera(void) {
   g_have_yaw = 0;
   g_pitch_offset = 0.0f;
@@ -795,6 +827,20 @@ static void __cdecl on_camera_updated(void) {
   // The chase camera's OWN yaw this frame -- where it wants the eye, before we say anything.
   auto_yaw = (h > 0.0f) ? f_atan2(vx, vz) : g_camera_yaw;
 
+  if (g_always_engaged) {
+    // Re-frame on a warp as well as on first engage: a new area is framed differently (measured,
+    // distance ~100 in the lobby against ~50 in a dungeon), so a held framing goes stale across one.
+    float mx = tgt->x - g_prev_target.x;
+    float my = tgt->y - g_prev_target.y;
+    float mz = tgt->z - g_prev_target.z;
+    int warped = g_have_prev_target && (f_sqrt(mx * mx + my * my + mz * mz) > WARP_UNITS);
+
+    if (!g_have_yaw || warped)
+      engage_camera(auto_yaw, h, vy);
+  }
+  g_prev_target = *tgt;
+  g_have_prev_target = 1;
+
   if (have_pad) {
     // Negated after the first in-game session: pushing the stick right must swing the view right,
     // and the unnegated sense read backwards. RightStickInvertX now means "the other way from the
@@ -808,12 +854,8 @@ static void __cdecl on_camera_updated(void) {
     if (steer_x != 0.0f || steer_y != 0.0f) {
       // Take control on first touch, seeded from wherever the chase camera currently is, so
       // engaging never produces a jump.
-      if (!g_have_yaw) {
-        g_camera_yaw = auto_yaw;
-        g_hold_h = h;                    // whatever framing the chase camera had chosen, kept
-        g_hold_y = vy;
-        g_have_yaw = 1;
-      }
+      if (!g_have_yaw)
+        engage_camera(auto_yaw, h, vy);  // seeded from the chase camera, so this never jumps
       g_camera_yaw = wrap_angle(g_camera_yaw + steer_x * rate);
 
       if (g_allow_pitch) {
@@ -988,10 +1030,10 @@ __declspec(dllexport) void __stdcall load(void) {
 
   if (patch_camera()) {
     rsc_log("patched ok (call %08X -> hook) enabled=%d sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d freeze=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d freeze=%d always=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_freeze_chase, g_return_speed, g_recentre_trigger,
+            g_invert_x, g_invert_y, g_freeze_chase, g_always_engaged, g_return_speed, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
