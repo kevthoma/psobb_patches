@@ -275,25 +275,25 @@ static int g_return_speed = BASE_RETURN_SPEED;   // RightStickReturnSpeed, degre
 // this choice, so it is expressed once here rather than as four knobs a player has to reason about.
 // The three positions are the same ones Ephinea offers, and are calibrated against it:
 //
-//   ENABLED   the chase camera stays in charge. You can still swing the view, but it is reclaimed
-//             quickly -- closest to stock PSO with a nudgeable camera.
-//   HYBRID    you aim it, and it eases back behind you over a few seconds of running. Their
-//             measured recovery is 3-5s from ~90 degrees off; 25 deg/s lands in that window.
+//   ENABLED   the chase camera stays in charge. You can swing the view, and it eases back behind
+//             you while you move. Measured off Ephinea at 26 deg/s, and it does NOT drift while
+//             the character stands still.
 //   DISABLED  the camera holds the angle you give it and never reclaims. The chase camera still
 //             chooses distance and height -- theirs visibly does, so ours must not freeze them.
+//
+// ⛔ There used to be a third mode, HYBRID, distinct from ENABLED by reclaiming faster (we used
+// 120 deg/s). Measuring Ephinea killed it: their Enabled reclaims at 24.3 deg/s and their Hybrid at
+// 26.1 -- the same within noise, so the two are not distinguishable in the client we were copying,
+// and our 120 was invented rather than observed. Two modes, and the surviving one uses the measured
+// rate.
 //
 // An explicit low-level key in widescreen.cfg still overrides whatever the mode selected, because
 // the mode only supplies the DEFAULT for each. That keeps tuning possible without adding positions.
 // ---------------------------------------------------------------------------
 #define CHASE_ENABLED       0
-#define CHASE_HYBRID        1
-#define CHASE_DISABLED      2
+#define CHASE_DISABLED      1
 
-// Chase reclaims a 90 degree swing in about 0.75s -- fast enough to feel like the chase camera is
-// still driving, slow enough not to snap.
-#define ENABLED_RETURN      120
-
-static int g_chase_mode  = CHASE_HYBRID; // ChaseCam
+static int g_chase_mode  = CHASE_ENABLED; // ChaseCam
 
 // Take the camera on the first frame and keep it, instead of waiting for the player to touch the
 // right stick. OFF by default.
@@ -501,20 +501,19 @@ static void load_config(void) {
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
   // The mode first: it sets the defaults that the individual keys below may then override.
   g_chase_mode = cfg_int(buf, got, "ChaseCam", g_chase_mode);
+  // ⚠ 2 was "Disabled" in the old three-mode list (Enabled/Hybrid/Disabled). Migrate it rather than
+  // clamping, or an existing config silently flips the player from Disabled to Enabled. The
+  // launcher does the same mapping when it loads.
+  if (g_chase_mode == 2)
+    g_chase_mode = CHASE_DISABLED;
   if (g_chase_mode < CHASE_ENABLED || g_chase_mode > CHASE_DISABLED)
-    g_chase_mode = CHASE_HYBRID;
-  switch (g_chase_mode) {
-    case CHASE_ENABLED:
-      g_always_engaged = 0; g_return_speed = ENABLED_RETURN; g_freeze_chase = 0;
-      break;
-    case CHASE_DISABLED:
-      // ⚠ freeze OFF. The first attempt at this mode froze distance and height as well, and that is
-      // what made it worse rather than better -- Ephinea's Disabled keeps both dynamic.
-      g_always_engaged = 1; g_return_speed = 0; g_freeze_chase = 0;
-      break;
-    default:
-      g_always_engaged = 0; g_return_speed = BASE_RETURN_SPEED; g_freeze_chase = 1;
-      break;
+    g_chase_mode = CHASE_ENABLED;
+  // ⚠ freeze OFF in both: the resting-distance hold supersedes it, and freezing distance is what
+  // made the first attempt at Disabled worse rather than better.
+  if (g_chase_mode == CHASE_DISABLED) {
+    g_always_engaged = 1; g_return_speed = 0; g_freeze_chase = 0;
+  } else {
+    g_always_engaged = 0; g_return_speed = BASE_RETURN_SPEED; g_freeze_chase = 0;
   }
 
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
@@ -1268,7 +1267,7 @@ __declspec(dllexport) void __stdcall load(void) {
             "(right analog rows will still show their bindings)", ADDR_PADROW_CALL);
 
   if (patch_camera()) {
-    static const char* const mode_name[3] = { "enabled", "hybrid", "disabled" };
+    static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
             "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",

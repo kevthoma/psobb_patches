@@ -405,8 +405,7 @@ namespace Corellia
         // Chase Cam positions, in the order they appear in the dropdown; the index is the ChaseCam
         // value the plugin reads. A spectrum from "the game drives" to "you drive".
         static readonly string[] ChaseCamNames = {
-            "Enabled - camera follows you",
-            "Hybrid - eases back while moving",
+            "Enabled - eases back behind you as you move",
             "Disabled - stays where you put it",
         };
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin,
@@ -804,9 +803,12 @@ namespace Corellia
             // Default TRUE, to match the plugin's compiled default. A mismatch here would silently
             // flip the feature the first time anyone opened this window and pressed Save.
             cbRightStick.Checked = AsBool(d, "RightStickCamera", true);
-            // Default 1 = Hybrid, matching the plugin's own default.
-            int chase = ParseInt(d, "ChaseCam", 1);
-            if (chase < 0 || chase >= ChaseCamNames.Length) chase = 1;
+            // Default 0 = Enabled, matching the plugin's own default. A stale 2 from the old
+            // three-mode list meant "Disabled", which is now 1 -- map it rather than silently
+            // resetting someone's choice.
+            int chase = ParseInt(d, "ChaseCam", 0);
+            if (chase == 2) chase = 1;
+            if (chase < 0 || chase >= ChaseCamNames.Length) chase = 0;
             cboChaseCam.SelectedIndex = chase;
             cboChaseCam.Enabled = cbRightStick.Checked;
 
