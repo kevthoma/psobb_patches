@@ -68,8 +68,10 @@ Settings live in `widescreen.cfg`:
 |---|---|---|
 | `ChaseCam` | `1` | How the chase camera and the player share the camera: `0` Enabled, `1` Hybrid, `2` Disabled. Sets the defaults for the three keys below it. |
 | `RightStickCamera` | `1` | Master on/off — modern camera versus classic PSO. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**, and applied live: see below. |
-| `RightStickSensitivity` | `100` | Percent. 100 = 100°/second at full deflection. |
-| `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
+| `RightStickSensitivity` | `100` | Percent, scaling both turn speeds. |
+| `RightStickSpeedSlow` / `RightStickSpeedFast` | `78` / `162` | Degrees/second below and above the split. |
+| `RightStickSpeedSplit` | `50` | Percent deflection at which the speed steps up. |
+| `RightStickDeadzone` | `10` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
 | `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
 | `RightStickFreezeChase` | `1` | Hold the eye **distance and height** while you are steering, turning it into a plain orbit camera. |
@@ -95,6 +97,15 @@ disable a menu entry elsewhere (colour `0xFF909090`, and the item's cursor bit c
 Nothing is written to your key config. The bindings are left exactly as you set them — which matters
 on Blue Burst, where that config syncs to the server, so clearing it would persist after you switched
 the camera back off.
+
+**Turning is two fixed speeds, not proportional control.** Past the deadzone the camera turns at a
+constant slow speed, stepping up to a constant fast speed past half deflection. That is measured from
+Ephinea rather than invented: binning their camera's turn rate against actual stick deflection gives
+two flat plateaus (~78°/s and ~162°/s) with a step near half, not a ramp.
+
+It matters more than it sounds. Proportional control means a small nudge barely moves the camera and
+the rate changes constantly under your thumb; two fixed speeds give a decisive, predictable rate for
+fine aiming and a second one for spinning round.
 
 **The toggle applies while the game is running.** Every setting here is re-read a few seconds after
 `widescreen.cfg` changes, so switching between classic and modern controls in the launcher's Options

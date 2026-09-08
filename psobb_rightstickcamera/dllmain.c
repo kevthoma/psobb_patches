@@ -156,10 +156,25 @@
 // Still a config key: if cutscenes turn out to need protecting, bits go back without a rebuild.
 #define DEFAULT_SUPPRESS    0x820
 
-// Degrees per frame at full stick deflection, before RightStickSensitivity scales it. The camera
-// update runs once per frame and the client targets 30fps, so 3.3333 is 100 degrees/second.
-// Raised from 3.0 (90 deg/s) after the first in-game session, which read as slightly sluggish.
-#define BASE_DEGREES        3.3333333f
+// ⭐ TWO SPEEDS, NOT A RAMP. Measured off Ephinea while stationary, binning camera turn rate against
+// actual stick deflection (628 samples, 22s):
+//
+//     |stick|  0.05 -> 0 deg/s        (deadzone, their CAMERA_DEADZONE = 10)
+//              0.15 -> 81
+//              0.35 -> 78             } flat, about 78 deg/s
+//              0.50 -> 116            (transition)
+//              0.55 -> 163
+//              1.00 -> 161            } flat, about 162 deg/s
+//
+// Two plateaus with a step near half deflection -- NOT proportional control. That is very likely
+// why theirs reads as smoother: a constant, decisive speed for fine aiming and a second constant
+// speed for spinning round, with no need to modulate thumb pressure to hold a rate.
+//
+// Ours was a straight line from 0 to 100 deg/s with a 20% deadzone, so a small nudge of 0.2 turned
+// at 20 deg/s where theirs turns at 78. That is the difference the player feels.
+#define SPEED_SLOW_DEG      78           // deg/s below the split
+#define SPEED_FAST_DEG      162          // deg/s at or above it
+#define SPEED_SPLIT_PCT     50           // % deflection where it steps up
 
 #define PI                  3.14159265358979323846f
 #define DEG2RAD             (PI / 180.0f)
@@ -196,7 +211,11 @@ int _fltused = 0;
 // ---------------------------------------------------------------------------
 static int g_enabled     = 1;            // RightStickCamera
 static int g_sensitivity = 100;          // RightStickSensitivity, percent
-static int g_deadzone    = 20;           // RightStickDeadzone, percent of full scale
+// 10% matches Ephinea's measured deadzone; 20 was our own guess and made small nudges useless.
+static int g_deadzone    = 10;           // RightStickDeadzone, percent of full scale
+static int g_speed_slow  = SPEED_SLOW_DEG;   // RightStickSpeedSlow
+static int g_speed_fast  = SPEED_FAST_DEG;   // RightStickSpeedFast
+static int g_speed_split = SPEED_SPLIT_PCT;  // RightStickSpeedSplit
 static int g_invert_x    = 0;            // RightStickInvertX
 // ⚠ Which way is "up" is a coin flip until it is tried. DirectInput's Y axes are positive-down, and
 // a positive pitch here raises the eye, so pushing the stick forward probably lowers the camera --
@@ -451,6 +470,13 @@ static void load_config(void) {
   g_enabled     = cfg_int(buf, got, "RightStickCamera", g_enabled) ? 1 : 0;
   g_sensitivity = cfg_int(buf, got, "RightStickSensitivity", g_sensitivity);
   g_deadzone    = cfg_int(buf, got, "RightStickDeadzone", g_deadzone);
+  g_speed_slow  = cfg_int(buf, got, "RightStickSpeedSlow", g_speed_slow);
+  g_speed_fast  = cfg_int(buf, got, "RightStickSpeedFast", g_speed_fast);
+  g_speed_split = cfg_int(buf, got, "RightStickSpeedSplit", g_speed_split);
+  if (g_speed_slow < 1) g_speed_slow = 1;
+  if (g_speed_fast < 1) g_speed_fast = 1;
+  if (g_speed_split < 1) g_speed_split = 1;
+  if (g_speed_split > 100) g_speed_split = 100;
   g_invert_x    = cfg_int(buf, got, "RightStickInvertX", g_invert_x) ? 1 : 0;
   g_invert_y    = cfg_int(buf, got, "RightStickInvertY", g_invert_y) ? 1 : 0;
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
@@ -703,11 +729,18 @@ static int recentre_down(const pad_state* p) {
   return 0;
 }
 
-// Deadzone and rescale, so the first movement past the deadzone starts from zero rather than
-// jumping. Input is already -1..1 about centre.
+// Turn rate for a stick position, in RADIANS PER FRAME, signed.
+//
+// Deliberately NOT proportional: outside the deadzone the rate is one of two constants, stepping up
+// at RightStickSpeedSplit. See the measurement above the SPEED_ defines -- this reproduces how
+// Ephinea's camera actually behaves, and proportional control is what ours had while feeling worse.
+//
+// The threshold is tested against the RAW deflection, not a post-deadzone rescale, so that the split
+// sits where the player's thumb feels it rather than moving with the deadzone setting.
 static float shape_axis(float v, int invert) {
   float dz = (float)g_deadzone / 100.0f;
-  float sign, mag;
+  float split = (float)g_speed_split / 100.0f;
+  float sign, mag, deg;
 
   if (v > 1.0f) v = 1.0f;
   if (v < -1.0f) v = -1.0f;
@@ -716,7 +749,10 @@ static float shape_axis(float v, int invert) {
     return 0.0f;
   sign = (v < 0.0f) ? -1.0f : 1.0f;
   if (invert) sign = -sign;
-  return sign * ((mag - dz) / (1.0f - dz));
+
+  deg = (mag < split) ? (float)g_speed_slow : (float)g_speed_fast;
+  deg = deg * (float)g_sensitivity / 100.0f;
+  return sign * deg * DEG2RAD / 30.0f;         // deg/s -> rad/frame at 30fps
 }
 
 // Hand the camera back to the client. Used by the recentre control, by the suppressed states, and
@@ -835,7 +871,6 @@ static void __cdecl on_camera_updated(void) {
   vec3f* tgt;
   float vx, vy, vz, h, r;
   float nx, nz, ny;
-  float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
   pad_state pad;
   float auto_yaw;
   int have_pad, recentre;
@@ -967,7 +1002,7 @@ static void __cdecl on_camera_updated(void) {
     // Negated after the first in-game session: pushing the stick right must swing the view right,
     // and the unnegated sense read backwards. RightStickInvertX now means "the other way from the
     // one that felt natural", which is what an invert switch should mean.
-    float steer_x = shape_axis(-pad.rx, g_invert_x);
+    float steer_x = shape_axis(-pad.rx, g_invert_x);   // already rad/frame
     // XInput's Y is positive-UP, and a positive pitch here RAISES the eye (i.e. looks further
     // down). Negating makes stick-forward look up, which is the un-inverted convention;
     // RightStickInvertY then means what its name says.
@@ -979,10 +1014,10 @@ static void __cdecl on_camera_updated(void) {
       // engaging never produces a jump.
       if (!g_have_yaw)
         engage_camera(auto_yaw, h, vy);  // seeded from the chase camera, so this never jumps
-      g_camera_yaw = wrap_angle(g_camera_yaw + steer_x * rate);
+      g_camera_yaw = wrap_angle(g_camera_yaw + steer_x);
 
       if (g_allow_pitch) {
-        g_pitch_offset += steer_y * rate;
+        g_pitch_offset += steer_y;
         if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
         if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
       }
@@ -1194,11 +1229,12 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[3] = { "enabled", "hybrid", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
+            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split,
+            g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
