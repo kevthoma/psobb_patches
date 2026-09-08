@@ -567,7 +567,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 652);
+            ClientSize = new Size(430, 696);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -627,14 +627,26 @@ namespace Corellia
             tbEffects = AddVolumeSlider(gSound, "Effects:", 88);
             Controls.Add(gSound);
 
+            // Controller settings. Both entries are about how the pad behaves, so they belong together
+            // rather than loose among the login and party options.
+            var gPad = new GroupBox { Text = "Controller Settings", Location = new Point(16, 490), Size = new Size(398, 82) };
+
             // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
             // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
-            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 490), AutoSize = true };
-            Controls.Add(cbController);
+            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(14, 24), AutoSize = true };
+            gPad.Controls.Add(cbController);
+
+            // Right-stick camera: classic PSO controls versus modern twin-stick ones. On by default,
+            // matching the plugin's own default -- unchecking writes RightStickCamera=0, which the
+            // plugin reads at startup and then leaves the client's camera completely untouched.
+            cbRightStick = new CheckBox { Text = "Right-stick camera (modern controls)",
+                                          Location = new Point(14, 52), AutoSize = true };
+            gPad.Controls.Add(cbRightStick);
+            Controls.Add(gPad);
 
             // Remember login — toggles the game's own ACCOUNT_CHECK / PASSWORD_CHECK registry flags
             // (like the native option). We never read or write the credentials themselves.
-            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 514), AutoSize = true };
+            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 582), AutoSize = true };
             Controls.Add(cbSaveLogin);
 
             // Remember the create-game settings: play mode, difficulty, party name and password.
@@ -642,17 +654,10 @@ namespace Corellia
             // The password is the part that earns an opt-in -- a secret at rest, and a restore that
             // goes wrong changes who can join -- but one switch is what was chosen for consistency.
             cbRememberParty = new CheckBox { Text = "Remember party settings",
-                                             Location = new Point(24, 538), AutoSize = true };
+                                             Location = new Point(24, 606), AutoSize = true };
             Controls.Add(cbRememberParty);
 
-            // Right-stick camera: classic PSO controls versus modern twin-stick ones. On by default,
-            // matching the plugin's own default -- unchecking writes RightStickCamera=0, which the
-            // plugin reads at startup and then leaves the client's camera completely untouched.
-            cbRightStick = new CheckBox { Text = "Right-stick camera (modern controls)",
-                                          Location = new Point(24, 562), AutoSize = true };
-            Controls.Add(cbRightStick);
-
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 592), Size = new Size(130, 44) };
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 636), Size = new Size(130, 44) };
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
