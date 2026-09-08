@@ -66,6 +66,7 @@ Settings live in `widescreen.cfg`:
 
 | Key | Default | Meaning |
 |---|---|---|
+| `ChaseCam` | `1` | How the chase camera and the player share the camera: `0` Enabled, `1` Hybrid, `2` Disabled. Sets the defaults for the three keys below it. |
 | `RightStickCamera` | `1` | Master on/off — modern camera versus classic PSO. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**, and applied live: see below. |
 | `RightStickSensitivity` | `100` | Percent. 100 = 100°/second at full deflection. |
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
@@ -98,6 +99,23 @@ the camera back off.
 window takes effect without restarting the client and without reinstalling or re-patching anything.
 Switched off, the plugin leaves the client's camera entirely alone — the hook stays in place so the
 setting remains changeable, but it returns before reading or writing any camera state.
+
+## Two settings, not four
+
+Only two decisions matter, and the launcher exposes exactly those:
+
+- **Right-stick camera** — on or off. Off is classic PSO, and nothing is patched into the camera path.
+- **Chase cam** — how the chase camera and you share control:
+
+| Mode | Behaviour |
+|---|---|
+| **Enabled** | The chase camera stays in charge. You can swing the view, but it is reclaimed in under a second. Closest to stock PSO with a nudgeable camera. |
+| **Hybrid** *(default)* | You aim it, and it eases back behind you over a few seconds of running. Holds while you stand still. |
+| **Disabled** | The camera holds the angle you give it and never reclaims it. The chase camera still chooses distance and height. |
+
+The individual keys (`RightStickReturnSpeed`, `RightStickAlwaysEngaged`, `RightStickFreezeChase`)
+still work and **override** whatever the mode selected — the mode only supplies their defaults — so
+tuning stays possible without adding more positions to the dropdown.
 
 **The camera holds an absolute world angle, and it is not an offset from the chase camera.** Each
 frame the plugin reads the angle the chase camera just chose and cancels it, so the view stays

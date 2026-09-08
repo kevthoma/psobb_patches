@@ -395,12 +395,20 @@ namespace Corellia
         readonly string dir;
         readonly string cfgPath;
 
-        ComboBox cboMode, cboRes, cboSceneSharpen, cboFont;
+        ComboBox cboMode, cboRes, cboSceneSharpen, cboFont, cboChaseCam;
 
         // Which modes the dropdown currently OFFERS, as indices into DisplayModes/DisplayModeKeys.
         // The dropdown position is no longer the mode index, because Fullscreen is not offered --
         // see BuildModeList. Never index DisplayModeKeys with cboMode.SelectedIndex directly.
         readonly List<int> offeredModes = new List<int>();
+
+        // Chase Cam positions, in the order they appear in the dropdown; the index is the ChaseCam
+        // value the plugin reads. A spectrum from "the game drives" to "you drive".
+        static readonly string[] ChaseCamNames = {
+            "Enabled - camera follows you",
+            "Hybrid - eases back while moving",
+            "Disabled - stays where you put it",
+        };
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin,
                  cbRememberParty, cbRightStick;
         TrackBar tbMaster, tbMusic, tbEffects;
@@ -567,7 +575,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 696);
+            ClientSize = new Size(430, 732);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -629,7 +637,7 @@ namespace Corellia
 
             // Controller settings. Both entries are about how the pad behaves, so they belong together
             // rather than loose among the login and party options.
-            var gPad = new GroupBox { Text = "Controller Settings", Location = new Point(16, 490), Size = new Size(398, 82) };
+            var gPad = new GroupBox { Text = "Controller Settings", Location = new Point(16, 490), Size = new Size(398, 118) };
 
             // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
             // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
@@ -642,11 +650,21 @@ namespace Corellia
             cbRightStick = new CheckBox { Text = "Right-stick camera (modern controls)",
                                           Location = new Point(14, 52), AutoSize = true };
             gPad.Controls.Add(cbRightStick);
+
+            // How the chase camera and the player share the camera. Only meaningful when the
+            // right-stick camera is on, so it follows it and greys out with it.
+            var lblChase = new Label { Text = "Chase cam:", Location = new Point(14, 84), AutoSize = true };
+            cboChaseCam = new ComboBox { Location = new Point(96, 80), Size = new Size(280, 24),
+                                         DropDownStyle = ComboBoxStyle.DropDownList };
+            cboChaseCam.Items.AddRange(ChaseCamNames);
+            gPad.Controls.Add(lblChase);
+            gPad.Controls.Add(cboChaseCam);
+            cbRightStick.CheckedChanged += (s2, e2) => { cboChaseCam.Enabled = cbRightStick.Checked; };
             Controls.Add(gPad);
 
             // Remember login — toggles the game's own ACCOUNT_CHECK / PASSWORD_CHECK registry flags
             // (like the native option). We never read or write the credentials themselves.
-            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 582), AutoSize = true };
+            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 618), AutoSize = true };
             Controls.Add(cbSaveLogin);
 
             // Remember the create-game settings: play mode, difficulty, party name and password.
@@ -654,10 +672,10 @@ namespace Corellia
             // The password is the part that earns an opt-in -- a secret at rest, and a restore that
             // goes wrong changes who can join -- but one switch is what was chosen for consistency.
             cbRememberParty = new CheckBox { Text = "Remember party settings",
-                                             Location = new Point(24, 606), AutoSize = true };
+                                             Location = new Point(24, 642), AutoSize = true };
             Controls.Add(cbRememberParty);
 
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 636), Size = new Size(130, 44) };
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 672), Size = new Size(130, 44) };
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -786,6 +804,11 @@ namespace Corellia
             // Default TRUE, to match the plugin's compiled default. A mismatch here would silently
             // flip the feature the first time anyone opened this window and pressed Save.
             cbRightStick.Checked = AsBool(d, "RightStickCamera", true);
+            // Default 1 = Hybrid, matching the plugin's own default.
+            int chase = ParseInt(d, "ChaseCam", 1);
+            if (chase < 0 || chase >= ChaseCamNames.Length) chase = 1;
+            cboChaseCam.SelectedIndex = chase;
+            cboChaseCam.Enabled = cbRightStick.Checked;
 
             // Default to the desktop size rather than a fixed one: it is the only size guaranteed
             // to be a real display mode on this machine.
@@ -863,6 +886,7 @@ namespace Corellia
             SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
             SetKey(lines, "RememberPartyInfo", cbRememberParty.Checked ? "1" : "0");
             SetKey(lines, "RightStickCamera", cbRightStick.Checked ? "1" : "0");
+            SetKey(lines, "ChaseCam", Math.Max(0, cboChaseCam.SelectedIndex).ToString());
             SetKey(lines, "MasterVolume", tbMaster.Value.ToString());
             SetKey(lines, "MusicVolume", tbMusic.Value.ToString());
             SetKey(lines, "EffectVolume", tbEffects.Value.ToString());

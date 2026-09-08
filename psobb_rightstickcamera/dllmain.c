@@ -249,6 +249,33 @@ static int g_return_speed = BASE_RETURN_SPEED;   // RightStickReturnSpeed, degre
 // HEIGHT almost not at all (6..8) while swinging its DISTANCE from 19 to 77 -- a 4x spread, and up
 // to 45 units away from what the player had framed. That constant push-and-pull is what made the
 // camera feel like it was fighting back; holding the framing is what stopped it.
+// ---------------------------------------------------------------------------
+// ChaseCam: the one setting that decides how the chase camera and the player share the camera.
+//
+// Everything below it (always-engaged, return speed, and what recentre does) is a consequence of
+// this choice, so it is expressed once here rather than as four knobs a player has to reason about.
+// The three positions are the same ones Ephinea offers, and are calibrated against it:
+//
+//   ENABLED   the chase camera stays in charge. You can still swing the view, but it is reclaimed
+//             quickly -- closest to stock PSO with a nudgeable camera.
+//   HYBRID    you aim it, and it eases back behind you over a few seconds of running. Their
+//             measured recovery is 3-5s from ~90 degrees off; 25 deg/s lands in that window.
+//   DISABLED  the camera holds the angle you give it and never reclaims. The chase camera still
+//             chooses distance and height -- theirs visibly does, so ours must not freeze them.
+//
+// An explicit low-level key in widescreen.cfg still overrides whatever the mode selected, because
+// the mode only supplies the DEFAULT for each. That keeps tuning possible without adding positions.
+// ---------------------------------------------------------------------------
+#define CHASE_ENABLED       0
+#define CHASE_HYBRID        1
+#define CHASE_DISABLED      2
+
+// Chase reclaims a 90 degree swing in about 0.75s -- fast enough to feel like the chase camera is
+// still driving, slow enough not to snap.
+#define ENABLED_RETURN      120
+
+static int g_chase_mode  = CHASE_HYBRID; // ChaseCam
+
 // Take the camera on the first frame and keep it, instead of waiting for the player to touch the
 // right stick. OFF by default.
 //
@@ -374,6 +401,24 @@ static void load_config(void) {
   g_invert_y    = cfg_int(buf, got, "RightStickInvertY", g_invert_y) ? 1 : 0;
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
+  // The mode first: it sets the defaults that the individual keys below may then override.
+  g_chase_mode = cfg_int(buf, got, "ChaseCam", g_chase_mode);
+  if (g_chase_mode < CHASE_ENABLED || g_chase_mode > CHASE_DISABLED)
+    g_chase_mode = CHASE_HYBRID;
+  switch (g_chase_mode) {
+    case CHASE_ENABLED:
+      g_always_engaged = 0; g_return_speed = ENABLED_RETURN; g_freeze_chase = 0;
+      break;
+    case CHASE_DISABLED:
+      // ⚠ freeze OFF. The first attempt at this mode froze distance and height as well, and that is
+      // what made it worse rather than better -- Ephinea's Disabled keeps both dynamic.
+      g_always_engaged = 1; g_return_speed = 0; g_freeze_chase = 0;
+      break;
+    default:
+      g_always_engaged = 0; g_return_speed = BASE_RETURN_SPEED; g_freeze_chase = 1;
+      break;
+  }
+
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
   g_return_speed     = cfg_int(buf, got, "RightStickReturnSpeed", g_return_speed);
@@ -1024,10 +1069,12 @@ __declspec(dllexport) void __stdcall load(void) {
             "(right analog rows will still show their bindings)", ADDR_PADROW_CALL);
 
   if (patch_camera()) {
-    rsc_log("patched ok (call %08X -> hook) enabled=%d sens=%d%% deadzone=%d%% pitch=%s "
+    static const char* const mode_name[3] = { "enabled", "hybrid", "disabled" };
+    rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
             "invX=%d invY=%d freeze=%d always=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
-            ADDR_UPDATE_CALL, g_enabled, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
+            ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
+            g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_freeze_chase, g_always_engaged, g_return_speed, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
