@@ -359,6 +359,23 @@ static float g_target_move = 0.0f;       // this frame's look-at movement, compu
 static int   g_have_prev_target = 0;
 static int   g_warped = 0;               // set when that movement looks like a teleport
 
+// ⚠ Recentring is NOT instantaneous, and treating it as such is a bug.
+//
+// The chase camera swings behind the character gradually. In always-engaged mode we used to release
+// and re-engage in the same frame, which pinned the camera to however far that swing had got --
+// typically less than half way -- so recentring took two or three presses to actually end up behind
+// the character. Measured: one press moved the held angle 48.7 degrees, the next another 25.2.
+//
+// So after a recentre we stay OUT of the way and let the chase camera finish, re-engaging only once
+// it has settled. "Settled" is its own yaw changing by less than SETTLE_DEG per frame for
+// SETTLE_FRAMES consecutive frames.
+#define SETTLE_DEG          0.5f
+#define SETTLE_FRAMES       10
+static int   g_recentring = 0;
+static int   g_settle_count = 0;
+static float g_prev_auto_yaw = 0.0f;
+static int   g_have_prev_auto = 0;
+
 // Last-seen write time of widescreen.cfg, for live config reloads.
 static FILETIME g_cfg_mtime = { 0, 0 };
 static int      g_cfg_mtime_valid = 0;
@@ -863,6 +880,9 @@ static void __cdecl on_camera_updated(void) {
     rsc_diag("recentre fired (btn=%04X lt=%d rt=%d) -- released (was holding=%d yaw=%d/1000)",
              pad.buttons, pad.lt, pad.rt, g_have_yaw, f_toint(g_camera_yaw * 1000.0f));
     release_camera();
+    g_recentring = 1;                    // hands off until the chase camera has finished the swing
+    g_settle_count = 0;
+    g_have_prev_auto = 0;
   }
   g_recentre_held = recentre;
 
@@ -923,7 +943,24 @@ static void __cdecl on_camera_updated(void) {
 
   // Re-frame on a warp as well as on first engage: a new area is framed differently (measured,
   // distance ~100 in the lobby against ~50 in a dungeon), so a held framing goes stale across one.
-  if (g_always_engaged && (!g_have_yaw || g_warped))
+  // Watch the chase camera settle after a recentre.
+  if (g_recentring) {
+    float moved = g_have_prev_auto ? f_abs(wrap_angle(auto_yaw - g_prev_auto_yaw)) : 999.0f;
+
+    g_prev_auto_yaw = auto_yaw;
+    g_have_prev_auto = 1;
+    if (moved < SETTLE_DEG * DEG2RAD) {
+      if (++g_settle_count >= SETTLE_FRAMES) {
+        g_recentring = 0;                // it has arrived; take the camera back at that angle
+        rsc_diag("recentre: chase camera settled at yaw=%d/1000", f_toint(auto_yaw * 1000.0f));
+      }
+    } else {
+      g_settle_count = 0;
+    }
+  }
+
+  // Re-engage only when we are not waiting for a recentre to finish.
+  if (g_always_engaged && !g_recentring && (!g_have_yaw || g_warped))
     engage_camera(auto_yaw, h, vy);
 
   if (have_pad) {
@@ -937,6 +974,7 @@ static void __cdecl on_camera_updated(void) {
     float steer_y = g_allow_pitch ? shape_axis(-pad.ry, g_invert_y) : 0.0f;
 
     if (steer_x != 0.0f || steer_y != 0.0f) {
+      g_recentring = 0;                  // the player wants it now; stop waiting for the chase cam
       // Take control on first touch, seeded from wherever the chase camera currently is, so
       // engaging never produces a jump.
       if (!g_have_yaw)
