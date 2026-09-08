@@ -66,7 +66,7 @@ Settings live in `widescreen.cfg`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `RightStickCamera` | `1` | Master on/off. |
+| `RightStickCamera` | `1` | Master on/off. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**, so players can choose classic or modern controls without editing anything. |
 | `RightStickSensitivity` | `100` | Percent. 100 = 100°/second at full deflection. |
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
