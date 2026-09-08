@@ -135,6 +135,12 @@
 
 #define RSC_DIAG_EVERY      300          // frames between diagnostic lines -- see log.h
 
+// How often to notice that widescreen.cfg changed, so the launcher's checkbox takes effect without
+// restarting the client. 90 frames is ~3s at 30fps. The check itself is one GetFileAttributesEx --
+// the file is only re-read when its write time actually moves, so the common case costs a syscall
+// every three seconds and nothing else.
+#define RSC_CONFIG_POLL     90
+
 typedef struct { float x, y, z; } vec3f;
 
 // ⚠ Required because this is the first plugin in the repo to use floating point. MSVC emits a
@@ -224,6 +230,10 @@ static float g_hold_y     = 0.0f;        // height of the eye above the target
 static float g_pitch_offset = 0.0f;      // radians
 static DWORD g_frames = 0;
 
+// Last-seen write time of widescreen.cfg, for live config reloads.
+static FILETIME g_cfg_mtime = { 0, 0 };
+static int      g_cfg_mtime_valid = 0;
+
 // Find "<key>" at the start of a line in buf, and return the integer after '='. Returns `fallback`
 // if the key is absent or malformed. Deliberately not strtol: this plugin links no CRT.
 static int cfg_int(const char* buf, DWORD got, const char* key, int fallback) {
@@ -309,6 +319,25 @@ static void load_config(void) {
   if (g_sensitivity > 1000) g_sensitivity = 1000;
   if (g_deadzone < 0) g_deadzone = 0;
   if (g_deadzone > 95) g_deadzone = 95;
+}
+
+// Has widescreen.cfg been written since we last looked? Cheap enough to call a few times a second:
+// GetFileAttributesEx stats the file without opening it.
+static int config_changed(void) {
+  WIN32_FILE_ATTRIBUTE_DATA fad;
+  char path[MAX_PATH];
+
+  if (!rsc_sibling_path(path, MAX_PATH, "widescreen.cfg"))
+    return 0;
+  if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad))
+    return 0;                            // missing or unreadable: keep whatever we already have
+  if (g_cfg_mtime_valid &&
+      fad.ftLastWriteTime.dwLowDateTime == g_cfg_mtime.dwLowDateTime &&
+      fad.ftLastWriteTime.dwHighDateTime == g_cfg_mtime.dwHighDateTime)
+    return 0;
+  g_cfg_mtime = fad.ftLastWriteTime;
+  g_cfg_mtime_valid = 1;
+  return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +576,25 @@ static void __cdecl on_camera_updated(void) {
   int have_pad, recentre;
 
   g_frames++;
+
+  // Pick up a changed widescreen.cfg while the game is running, so toggling the launcher's
+  // checkbox takes effect without restarting the client -- or reinstalling anything.
+  if ((g_frames % RSC_CONFIG_POLL) == 0 && config_changed()) {
+    int was = g_enabled;
+    load_config();
+    if (was != g_enabled) {
+      rsc_log("config reloaded: right-stick camera %s", g_enabled ? "ON" : "OFF");
+      if (!g_enabled)
+        release_camera();                // do not strand a held angle when switching off
+    }
+  }
+
+  // Disabled at runtime: behave exactly as if the plugin were not installed. The hook is still in
+  // place -- that is what makes the toggle live -- but it returns before reading or writing any of
+  // the client's camera state, so the chase camera is left completely alone.
+  if (!g_enabled)
+    return;
+
   if (!cam)
     return;                              // before the camera exists, or after it is torn down
 
@@ -776,15 +824,17 @@ __declspec(dllexport) void __stdcall load(void) {
 
   load_config();
   xinput_init();
-  if (!g_enabled) {
-    rsc_log("disabled (RightStickCamera=0)");
-    return;
-  }
+  config_changed();                      // prime the mtime so the first poll is not a false change
 
+  // ⚠ Patch even when the feature is switched OFF. The hook has to be in place for the setting to
+  // be changeable at runtime; it checks g_enabled every frame and returns immediately when off,
+  // which costs a compare and leaves the client's camera untouched. Skipping the patch here would
+  // make turning the feature on require a client restart.
   if (patch_camera()) {
-    rsc_log("patched ok (call %08X -> hook) sens=%d%% deadzone=%d%% pitch=%s invX=%d invY=%d "
-            "freeze=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X xinput=%s%s",
-            ADDR_UPDATE_CALL, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
+    rsc_log("patched ok (call %08X -> hook) enabled=%d sens=%d%% deadzone=%d%% pitch=%s "
+            "invX=%d invY=%d freeze=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X "
+            "xinput=%s%s",
+            ADDR_UPDATE_CALL, g_enabled, g_sensitivity, g_deadzone, g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_freeze_chase, g_return_speed, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",

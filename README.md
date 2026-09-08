@@ -66,7 +66,7 @@ Settings live in `widescreen.cfg`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `RightStickCamera` | `1` | Master on/off. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**, so players can choose classic or modern controls without editing anything. |
+| `RightStickCamera` | `1` | Master on/off — modern camera versus classic PSO. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**, and applied live: see below. |
 | `RightStickSensitivity` | `100` | Percent. 100 = 100°/second at full deflection. |
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
@@ -80,6 +80,12 @@ Settings live in `widescreen.cfg`:
 **Vertical look is off by default.** It works and is clamped, but stacked on the chase camera's own
 pitch the two end up solving for height at the same time and it reads oddly in play. Set
 `RightStickPitch=1` to try it.
+
+**The toggle applies while the game is running.** Every setting here is re-read a few seconds after
+`widescreen.cfg` changes, so switching between classic and modern controls in the launcher's Options
+window takes effect without restarting the client and without reinstalling or re-patching anything.
+Switched off, the plugin leaves the client's camera entirely alone — the hook stays in place so the
+setting remains changeable, but it returns before reading or writing any camera state.
 
 **The camera holds an absolute world angle, and it is not an offset from the chase camera.** Each
 frame the plugin reads the angle the chase camera just chose and cancels it, so the view stays
