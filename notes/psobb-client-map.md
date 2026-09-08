@@ -593,7 +593,8 @@ Global pointer **`0x00A48A54`** → `0x1D4` bytes (`allocate_in_main_arena(0x1d4
 | `+0x19C` | FOV, passed to the projection setup |
 | `+0x1A0` | **`camera_desired_source`** |
 | `+0x1AC` | **`camera_desired_target`** |
-| `+0x1B8` / `+0x1BC` | source / target lerp factors |
+| `+0x1B8` | a lerp factor, but **not** the one that moves the eye — writing 1.0 changes nothing visible |
+| `+0x1BC` | ⭐ **the `camera_source` lerp**, stock value `0.2890` — see below |
 | `+0x1C0` / `+0x1C4` | shake frame counter / scaling |
 | `+0x1C8` | `desired_source_copy`, the "from" end of the collision ray |
 
@@ -603,6 +604,54 @@ the rest of the engine *consumes*: every billboarded sprite (`matrix_rotation_y`
 heading**, which is `0x8000 - y_rotation`.
 
 ➡ That last one is a free on-screen oracle: **if the minimap needle turns, the real camera moved.**
+
+### 📏 Zoom levels — MEASURED, and Ephinea's are the same ladder shifted in (2026-09-08)
+
+Settled horizontal eye→target distance, character stationary, read from `+0x178`/`+0x184` at each of
+the five zoom levels. Ephinea's column is their `CameraZoom1..5` config defaults.
+
+| Zoom | Corellia (vanilla) | height | Ephinea | Δ | our step | their step |
+|---|---|---|---|---|---|---|
+| 1 | 30.0 | −1.7 | 25.00 | 5.00 | — | — |
+| 2 | 50.3 | 5.6 | 45.42 | 4.83 | 20.3 | 20.42 |
+| 3 | 58.5 | 10.5 | 53.60 | 4.86 | 8.2 | 8.18 |
+| 4 | 66.6 | 15.3 | 61.80 | 4.83 | 8.1 | 8.20 |
+| 5 | 75.0 | 20.2 | 70.00 | 4.97 | 8.4 | 8.20 |
+
+⭐ **The step sizes match to within noise.** Ephinea's zoom table is the vanilla table shifted a
+constant **~4.9 units closer**, not an independent set of numbers — so the levels DO correspond
+one-to-one and "their Zoom N" is comparable to "our Zoom N", just tighter. (An earlier working
+assumption that the level numbers were incomparable was wrong.)
+
+Height rises with distance (−1.7 → 20.2), so zoom is a pitch-preserving arc, not a pure dolly.
+
+⛔ **This rules zoom out as the cause of the post-release "rubber band"** — at Zoom 2 we sit at 50.3
+against their 45.4, and 4.9 units cannot produce a 12× difference in settling tail.
+
+⚠ Measuring this needs a **liveness check**. A first attempt returned 253 byte-identical samples
+because the client was backgrounded and not running its frame loop; frozen data analyses perfectly
+happily as "the value never changed". `camtrace.ps1` now counts distinct camera states and refuses
+to report success without motion.
+
+### ⭐ `+0x1BC` is the camera lag — and it is the whole "rubber band" (2026-09-08)
+
+📏 Six clean stick-releases, character stationary, open Forest room:
+
+| | while rotating | while idle |
+|---|---|---|
+| yaw error (actual − commanded) | **+25.8°** | 0.0° |
+| distance ratio (actual ÷ commanded) | **0.894** | 1.000 |
+
+The camera trails the commanded point by a constant angle *and* a constant fraction of distance while
+the stick is held, then unwinds on release. Fitting the post-release decay gives **k = 0.289/frame**
+over 24 fits, and a live probe reads `+0x1BC` = **0.2890** bit-exact. One first-order lag, both axes.
+
+⛔ Two explanations killed by that measurement — do not revisit:
+- **Not collision.** Nothing to collide with; character speed 0.00 across all 396 samples.
+- **Not zoom distance.** 50.3 vs Ephinea's 45.4 cannot yield a 12× settling difference.
+
+⚠ `+0x1B8` and `+0x1BC` look like a pair and the obvious guess is source/target. Only `+0x1BC` moves
+the eye: `+0x1B8` was held at our own `1.0` for a whole session with no effect on the trailing.
 
 ### Per-frame update, and the one hook site
 

@@ -108,7 +108,14 @@
 #define OFF_SOURCE          0x178        // vec3f, current eye (lerped toward desired)
 #define OFF_TARGET          0x184        // vec3f, current look-at
 #define OFF_Y_ROTATION      0x194        // uint, PSO angle units -- OUTPUT ONLY, see header note
-#define OFF_LERP_SOURCE     0x1B8        // float; how fast camera_source chases desired_source
+// ⭐ TWO lerp factors sit here, and ONLY +0x1BC governs camera_source. Setting +0x1B8 to 1.0 leaves
+// the trailing completely unchanged; +0x1BC is the one whose value shows up in the motion.
+// 📏 Proof, 6 clean stick releases in open ground: the post-release yaw error decays as a clean
+// first-order lag whose fitted constant is 0.289/frame across 24 fits (spread 0.28-0.37), and a live
+// probe read +0x1BC = 0.2890 bit-exact while +0x1B8 held our own 1.0. Same lag drags the distance
+// (actual/commanded 0.894 while rotating, 1.000 idle) -- one lag, both axes.
+#define OFF_LERP_A          0x1B8        // float; we set it too, but it is NOT what moves the eye
+#define OFF_LERP_SOURCE     0x1BC        // float; THE one -- camera_source chases desired_source
 #define OFF_DESIRED_SOURCE  0x1A0        // vec3f  <-- the one field this plugin writes
 #define OFF_DESIRED_TARGET  0x1AC        // vec3f, the pivot we rotate about
 
@@ -350,14 +357,21 @@ static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
 // ⭐ How fast the client's own lerp drags the camera to where we put it, in percent per frame.
 // 0 leaves the client's value alone.
 //
-// 📏 Measured: releasing the stick while stationary, our camera keeps turning 35.8 deg over 1441 ms;
-// Ephinea's stops after 1.9 deg -- ours overshoots ~19x further. The client's factor works out
-// around 2.3%/frame, a ~43 frame time constant, so while turning the camera runs roughly 36 degrees
-// behind the input and then spends a second and a half catching up. That is the "rubber band".
+// 📏 Measured: releasing the stick while stationary, our camera keeps turning ~23 deg over ~700 ms;
+// Ephinea's stops after 1.9 deg. The cause is not overshoot and not wall collision -- it is a plain
+// first-order lag at 0.289/frame. While the stick is held the camera sits a steady 25.8 deg and 11%
+// of its distance BEHIND what we command, and on release it unwinds. That is the "rubber band", and
+// it is one lag showing up in two axes at once.
 //
-// Ephinea drives the camera position directly and does its own trailing, which is why their rotation
-// stops dead while their POSITION still lags (actual/commanded 0.80 while moving). We get the same
-// effect by making the client's lerp fast enough to stop being felt.
+// ⛔ Two dead ends, both refuted by measurement, do not revisit them:
+//   - "the camera is being displaced by map geometry" -- the trace above was taken standing still in
+//     the middle of an open Forest room with nothing to collide with, and character speed was 0.00
+//     for all 396 samples. Same 23 deg tail.
+//   - "our zoom level sits further out than theirs" -- ours is 50.3 at Zoom 2 against their 45.4.
+//     4.9 units cannot produce a 12x settling difference. See the zoom table in the client map.
+//
+// ⚠ The first version of this override wrote +0x1B8 and only appeared to help (35.8 -> 23.6 deg,
+// which was really run-to-run variation). Writing +0x1BC is what actually addresses it.
 #define DEFAULT_CAMERA_LERP 100
 static int   g_camera_lerp = DEFAULT_CAMERA_LERP;  // RightStickCameraLerp
 
@@ -1193,8 +1207,11 @@ static void __cdecl on_camera_updated(void) {
 
   // Only while we are actually driving. Left alone, a player who never touches the right stick gets
   // the client's own smoothing exactly as before.
-  if (g_camera_lerp > 0)
-    *(float*)(cam + OFF_LERP_SOURCE) = (float)g_camera_lerp / 100.0f;
+  if (g_camera_lerp > 0) {
+    float k = (float)g_camera_lerp / 100.0f;
+    *(float*)(cam + OFF_LERP_SOURCE) = k;   // +0x1BC -- the one that matters
+    *(float*)(cam + OFF_LERP_A) = k;        // +0x1B8 -- harmless, and kept so the pair stays coherent
+  }
 
   src->x = tgt->x + nx;
   src->y = tgt->y + ny;
