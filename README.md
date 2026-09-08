@@ -74,7 +74,8 @@ Settings live in `widescreen.cfg`:
 | `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
 | `RightStickFreezeChase` | `1` | Hold the eye **distance and height** while you are steering, turning it into a plain orbit camera. |
 | `RightStickReturnSpeed` | `25` | Degrees/second the camera drifts back behind you **while moving**. `0` holds the angle indefinitely. |
-| `RightStickYawLimit` | `120` | Degrees the camera may sit from directly behind you. `180` removes the limit. |
+| `RightStickFollowNear` / `RightStickFollowFar` | `60` / `180` | The follow band, as a percentage of the chase camera's distance. Inside it the camera does not move at all. Both `100` restores rigid tracking. |
+| `RightStickYawLimit` | `180` | Degrees the camera may sit from behind you. `180` (default) = no limit. |
 | `RightStickAlwaysEngaged` | `0` | Take the camera immediately instead of on first stick touch. |
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
@@ -101,15 +102,15 @@ window takes effect without restarting the client and without reinstalling or re
 Switched off, the plugin leaves the client's camera entirely alone — the hook stays in place so the
 setting remains changeable, but it returns before reading or writing any camera state.
 
-**The camera is kept within a cone behind you.** Inside `RightStickYawLimit` degrees of directly
-behind, nothing pulls at the camera at all. Only at the edge does your character's own turning drag
-it along — so it always ends up following, without tugging while you aim.
+**The camera holds a world-space position, and only follows you loosely.** Inside the follow band it
+does not move at all — you walk around inside a still frame, growing and shrinking, rather than being
+welded to the middle of the screen. Only when you reach the near or far edge of the band does it move,
+and only enough to put you back on the edge.
 
-The limit exists because with the camera in *front* of your character, three things go wrong at once
-in PSO specifically: movement is camera-relative so forward walks you toward the camera, your own
-character occludes what you are attacking, and the audio listener is camera-relative — PSO uses DS3D
-positional buffers, so combat audio audibly muffles when the enemy ends up far from the camera. Set
-it to `180` for unrestricted rotation.
+That distinction matters more than any of the rates. Recomputing the eye as *character + offset* every
+frame looks identical while you stand still and is completely different in motion: it pins you to one
+screen position and swings the whole world around you. `RightStickFollowNear`/`Far` set to `100` both
+restores that older rigid behaviour if you want to compare.
 
 ## Two settings, not four
 

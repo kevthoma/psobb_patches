@@ -297,8 +297,29 @@ static int g_chase_mode  = CHASE_HYBRID; // ChaseCam
 // positional buffers, so combat audio audibly muffles when the enemy ends up far from the camera
 // (observed in game 2026-09-08). None of that is fixable by tuning a rate; the camera simply should
 // not go there.
-#define DEFAULT_YAW_LIMIT   120
+// ⭐ THE FOLLOW BAND -- how far the eye may drift from the character before the camera moves at all.
+//
+// Percentages of the distance the chase camera currently wants. Inside the band the eye is left in
+// WORLD SPACE, completely untouched: the character walks around inside a still frame, growing and
+// shrinking, exactly as Ephinea's "Chase Cam: Disabled" does. Only when they reach the near or far
+// edge does the camera move, and only enough to put them back on the edge.
+//
+// ⚠ This replaces rigid tracking, which was the real defect. Pinning the eye at target + offset
+// every frame welds the character to one screen position and pivots the entire world around them --
+// that is what made our fixed-angle mode "decidedly worse" than theirs despite having the same
+// fixed angle. Setting NEAR and FAR both to 100 restores that old rigid behaviour exactly.
+#define DEFAULT_FOLLOW_NEAR 60           // % of the chase camera's distance
+#define DEFAULT_FOLLOW_FAR  180
+
+#define DEFAULT_YAW_LIMIT   180          // no cone: dragging the camera IS the snapping to avoid
 static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
+static int g_follow_near = DEFAULT_FOLLOW_NEAR;  // RightStickFollowNear
+static int g_follow_far  = DEFAULT_FOLLOW_FAR;   // RightStickFollowFar
+
+// The eye, in WORLD space, while we are holding it. Not an offset from the character -- that is the
+// whole point: it stays put while they move.
+static vec3f g_eye = { 0.0f, 0.0f, 0.0f };
+static int   g_eye_valid = 0;
 
 static int g_always_engaged = 0;         // RightStickAlwaysEngaged
 
@@ -437,6 +458,10 @@ static void load_config(void) {
 
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
+  g_follow_near      = cfg_int(buf, got, "RightStickFollowNear", g_follow_near);
+  g_follow_far       = cfg_int(buf, got, "RightStickFollowFar", g_follow_far);
+  if (g_follow_near < 10) g_follow_near = 10;
+  if (g_follow_far < g_follow_near) g_follow_far = g_follow_near;
   g_yaw_limit        = cfg_int(buf, got, "RightStickYawLimit", g_yaw_limit);
   if (g_yaw_limit < 10) g_yaw_limit = 10;
   if (g_yaw_limit > 180) g_yaw_limit = 180;
@@ -686,6 +711,7 @@ static void engage_camera(float auto_yaw, float h, float vy) {
   g_hold_h = h;
   g_hold_y = vy;
   g_have_yaw = 1;
+  g_eye_valid = 0;                       // seeded from the client's own eye on the next frame
 }
 
 static void release_camera(void) {
@@ -791,7 +817,7 @@ static void __cdecl on_camera_updated(void) {
   vec3f* src;
   vec3f* tgt;
   float vx, vy, vz, h, r;
-  float yaw, hh, yy, s, c, nx, nz, nh, ny;
+  float nx, nz, ny;
   float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
   pad_state pad;
   float auto_yaw;
@@ -960,50 +986,77 @@ static void __cdecl on_camera_updated(void) {
       g_camera_yaw = wrap_angle(auto_yaw - lim);
   }
 
-  // ⭐ ABSOLUTE, not additive. Build the eye vector directly from the angle we are holding, so the
-  // result IS that angle regardless of what the chase camera chose this frame.
+  // ⭐ The eye lives in WORLD space, not as an offset from the character.
   //
-  // The additive version this replaced -- a fixed offset added to the chase camera's yaw -- is
-  // wrong for a camera you aim: the chase camera re-aims itself continuously as the character runs
-  // and turns, so the view swung around on its own with the stick untouched. In combat that is
-  // actively harmful. Holding an absolute world angle is what "rotate the camera with the right
-  // stick" actually means.
+  // Each frame it is left exactly where it was, and only two things move it: the player steering
+  // (which orbits it about the character), and the follow band (which pulls it in or lets it out
+  // when the character gets too close or too far). Between those, the camera is genuinely still and
+  // the character moves around inside the frame.
   //
-  // Constructing the vector is exactly equivalent to rotating the chase camera's own vector by
-  // (held - auto), because such a rotation preserves horizontal distance and height and only sets
-  // the angle -- but written this way, freezing the framing is just a choice of which distance and
-  // height to feed in.
-  yaw = g_have_yaw ? g_camera_yaw : auto_yaw;
-  if (g_freeze_chase && g_have_yaw) {
-    hh = g_hold_h;                       // orbit at the framing we took control at
-    yy = g_hold_y;
-  } else {
-    hh = h;                              // let the chase camera keep choosing distance and height
-    yy = vy;
+  // The rigid version this replaces recomputed the eye as target + offset every frame, which looks
+  // identical while standing still and is completely different in motion: it welds the character to
+  // one screen position and swings the world around them.
+  if (!g_eye_valid) {
+    g_eye = *src;                        // start from wherever the client had the eye: no jump
+    g_eye_valid = 1;
   }
 
-  nx = hh * f_sin(yaw);
-  nz = hh * f_cos(yaw);
-  ny = yy;
+  {
+    float ex = g_eye.x - tgt->x;
+    float ez = g_eye.z - tgt->z;
+    float ey = g_eye.y - tgt->y;
+    float elen = f_sqrt(ex * ex + ez * ez);
+    float near_d = h * (float)g_follow_near / 100.0f;
+    float far_d = h * (float)g_follow_far / 100.0f;
+    float want = wrap_angle(g_camera_yaw - ((elen > 0.0f) ? f_atan2(ex, ez) : g_camera_yaw));
 
-  // Pitch: rotate the (horizontal distance, height) pair, then fold the result back into x/z by
-  // scaling. Doing it this way needs no asin -- only the sqrt above.
-  if (g_pitch_offset != 0.0f && hh > 0.0f) {
-    float rr = f_sqrt(hh * hh + yy * yy);
+    // Steering orbits the eye about the character, preserving its distance.
+    if (want != 0.0f && elen > 0.0f) {
+      float cs = f_cos(want), sn = f_sin(want);
+      float rx = ex * cs + ez * sn;
+      float rz = -ex * sn + ez * cs;
+      ex = rx; ez = rz;
+    }
 
-    s = f_sin(g_pitch_offset);
-    c = f_cos(g_pitch_offset);
-    nh = hh * c - yy * s;
-    ny = hh * s + yy * c;
-    // Refuse to pass the hard limit or to cross the axis. The accumulator clamp bounds only OUR
-    // contribution; the chase camera's own pitch rides underneath it, so the total needs its own
-    // stop. Rejecting the whole pitch step leaves yaw working, which is the half players notice.
-    if (nh <= 0.0f || f_abs(ny) > PITCH_SIN_LIMIT * rr) {
-      ny = yy;
+    // The band. Inside it, nothing happens at all -- this is the part that makes the camera feel
+    // fixed rather than glued to the character.
+    if (elen > 0.0f) {
+      float clamped = elen;
+      if (elen < near_d) clamped = near_d;
+      else if (elen > far_d) clamped = far_d;
+      if (clamped != elen) {
+        float k = clamped / elen;
+        ex *= k; ez *= k;
+      }
     } else {
-      float k = nh / hh;
-      nx *= k;
-      nz *= k;
+      ex = 0.0f; ez = near_d;            // degenerate: put it somewhere sane
+    }
+
+    // Height tracks the chase camera's, which barely varies (measured 6..8) and is not worth
+    // holding: letting it follow keeps the character correctly framed vertically on slopes.
+    ey = g_freeze_chase ? g_hold_y : vy;
+
+    g_eye.x = tgt->x + ex;
+    g_eye.y = tgt->y + ey;
+    g_eye.z = tgt->z + ez;
+    nx = ex; ny = ey; nz = ez;
+  }
+
+  // Pitch: rotate the (horizontal distance, height) pair, then fold back into x/z by scaling.
+  if (g_pitch_offset != 0.0f) {
+    float hh2 = f_sqrt(nx * nx + nz * nz);
+
+    if (hh2 > 0.0f) {
+      float rr = f_sqrt(hh2 * hh2 + ny * ny);
+      float sn = f_sin(g_pitch_offset), cs = f_cos(g_pitch_offset);
+      float nh2 = hh2 * cs - ny * sn;
+      float ny2 = hh2 * sn + ny * cs;
+
+      if (nh2 > 0.0f && f_abs(ny2) <= PITCH_SIN_LIMIT * rr) {
+        float k = nh2 / hh2;
+        nx *= k; nz *= k; ny = ny2;
+        g_eye.x = tgt->x + nx; g_eye.y = tgt->y + ny; g_eye.z = tgt->z + nz;
+      }
     }
   }
 
