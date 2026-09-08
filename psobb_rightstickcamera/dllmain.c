@@ -51,6 +51,25 @@
 #define ADDR_UPDATE_CALL    0x004D3B12   // `call 0x004D1FF4` inside UpdateDefaultNPCCameraState
 #define ADDR_SET_POINTS     0x004D1FF4   // set_global_camera_source_and_target(camera behaviour obj)
 #define ADDR_CAMERA_STATE   0x00A48A54   // -> camera_state_struct*, 0x1D4 bytes
+// Pad Button Config menu. The row loop's common tail runs once per row for all 16 rows, with the
+// row index in EBX and that row's text widget in ECX, AFTER the row's value label has been written:
+//
+//   00790D9A  mov ecx, [edi+0x2C]      ; the row's text widget
+//   00790D9D  call 0x0072E0E4          ; <- retargeted; we overwrite rows 2 and 3 first
+//   00790DA8  cmp ebx, 0x10            ; 16 rows
+//
+// Hooking the shared tail rather than either label branch means one call site instead of two, and it
+// does not matter which branch (axis names at 0x0097B264, button names at 0x0097B2E4) produced the
+// text -- we simply replace it afterwards.
+#define ADDR_PADROW_CALL    0x00790D9D   // `call 0x0072E0E4` -- the per-row tail
+#define ADDR_TEXT_SPACE     0x0072E0E4   // __thiscall(ecx = widget), what that call went to
+#define ADDR_TEXT_SETTEXT   0x0072DB60   // __thiscall(ecx = widget, wchar_t*, int) -- CALLEE cleans
+
+// Which rows are the right analog axes. Row order is the menu's own: 0 Move L/R, 1 Move F/B,
+// 2 Right Analog L/R, 3 Right Analog F/B, then the buttons. Confirmed against the in-game screen.
+#define PAD_ROW_RSTICK_X    2
+#define PAD_ROW_RSTICK_Y    3
+
 #define ADDR_MENU_FLAGS     0x00A489FC   // g_GenericMenuSubSelection
 // ⛔ NOT USED, and deliberately so. g_joyState (DIJOYSTATE2, 0x110 bytes) lives at 0x00ADCC80, and
 // the first two builds read the right stick from it. It does not work: it is the PAD CONFIG SCREEN'S
@@ -558,6 +577,54 @@ static void release_camera(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Pad Button Config: show the right analog rows as taken, while the camera owns them
+//
+// The client has no notion of a disabled menu row -- nothing in it greys one out or makes the cursor
+// skip one -- so rather than invent that, the two rows report what is actually true: the right stick
+// is driving the camera, so whatever they are bound to is not reaching the game.
+//
+// Nothing is written to the character's key config. The bindings are left exactly as the player set
+// them, which matters because on Blue Burst that config syncs to the server: clearing it would
+// persist after the camera was switched off again.
+// ---------------------------------------------------------------------------
+static const wchar_t RSC_ROW_TEXT[] = L"-- Camera --";
+
+// Safe to hand the client a static string: its own callers pass static globals here (the axis and
+// button name tables at 0x0097B264 / 0x0097B2E4), so this setter cannot be taking ownership.
+static void pad_row_set_text(void* widget, const wchar_t* text) {
+  __asm {
+    push 0x20
+    push text
+    mov  ecx, widget
+    mov  eax, ADDR_TEXT_SETTEXT
+    call eax                                             // ret 8: callee cleans both arguments
+  }
+}
+
+static void __cdecl on_pad_row(void* widget, int row) {
+  if (!g_enabled || !widget)
+    return;                              // classic controls: leave the menu exactly as it was
+  if (row != PAD_ROW_RSTICK_X && row != PAD_ROW_RSTICK_Y)
+    return;
+  pad_row_set_text(widget, RSC_ROW_TEXT);
+}
+
+// Replaces `call 0x0072E0E4`. ECX is the row's text widget and EBX the row index; both survive
+// pushad/popad, and the original is tail-jumped so its ret lands after our call site.
+void __declspec(naked) padRowHook(void) {
+  __asm {
+    pushad
+    push ebx                                             // row index
+    push ecx                                             // this row's text widget
+    call on_pad_row
+    add  esp, 8
+    popad
+    mov  eax, ADDR_TEXT_SPACE
+    jmp  eax
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The hook body
 //
 // Runs immediately after the auto-camera has written desired_source and desired_target, and before
@@ -796,6 +863,32 @@ void __declspec(naked) cameraHook(void) {
 // No VirtualProtect: this client's .text is already RWX, which is why no other plugin in this repo
 // unprotects either. If that ever changes, every plugin here breaks together and loudly.
 // ---------------------------------------------------------------------------
+// Separate from the camera patch on purpose: this one is cosmetic, and a guard failure here must
+// not cost the actual feature.
+static BOOL patch_pad_menu(void) {
+  DWORD target;
+
+  // mov ecx, [edi+0x2C] -- the widget load immediately before the call we are replacing.
+  if (*(BYTE*)(ADDR_PADROW_CALL - 3) != 0x8B ||
+      *(BYTE*)(ADDR_PADROW_CALL - 2) != 0x4F ||
+      *(BYTE*)(ADDR_PADROW_CALL - 1) != 0x2C)
+    return FALSE;
+  // cmp ebx, 0x10 -- the 16-row loop bound, 11 bytes past the call. Confirms this is the row loop
+  // and not some other site that happens to load a widget the same way.
+  if (*(BYTE*)(ADDR_PADROW_CALL + 11) != 0x83 ||
+      *(BYTE*)(ADDR_PADROW_CALL + 12) != 0xFB ||
+      *(BYTE*)(ADDR_PADROW_CALL + 13) != 0x10)
+    return FALSE;
+  if (*(BYTE*)ADDR_PADROW_CALL != 0xE8)
+    return FALSE;
+  target = (DWORD)(ADDR_PADROW_CALL + 5 + *(LONG*)(ADDR_PADROW_CALL + 1));
+  if (target != ADDR_TEXT_SPACE)
+    return FALSE;
+
+  *(DWORD*)(ADDR_PADROW_CALL + 1) = calc_disp32(ADDR_PADROW_CALL + 1, (ULONG_PTR)padRowHook);
+  return TRUE;
+}
+
 static BOOL patch_camera(void) {
   DWORD target;
 
@@ -830,6 +923,10 @@ __declspec(dllexport) void __stdcall load(void) {
   // be changeable at runtime; it checks g_enabled every frame and returns immediately when off,
   // which costs a compare and leaves the client's camera untouched. Skipping the patch here would
   // make turning the feature on require a client restart.
+  if (!patch_pad_menu())
+    rsc_log("pad menu NOT patched: row-loop signature did not match at %08X "
+            "(right analog rows will still show their bindings)", ADDR_PADROW_CALL);
+
   if (patch_camera()) {
     rsc_log("patched ok (call %08X -> hook) enabled=%d sens=%d%% deadzone=%d%% pitch=%s "
             "invX=%d invY=%d freeze=%d return=%ddeg/s recentre(trig=%d mask=%04X) suppress=%03X "

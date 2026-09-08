@@ -81,6 +81,14 @@ Settings live in `widescreen.cfg`:
 pitch the two end up solving for height at the same time and it reads oddly in play. Set
 `RightStickPitch=1` to try it.
 
+**The Pad Button Config screen reflects it.** While the camera is enabled, the two **Right Analog**
+rows read `-- Camera --` instead of their bindings, because whatever they are bound to is not
+reaching the game. Turning the feature off restores them.
+
+Nothing is written to your key config. The bindings are left exactly as you set them — which matters
+on Blue Burst, where that config syncs to the server, so clearing it would persist after you switched
+the camera back off.
+
 **The toggle applies while the game is running.** Every setting here is re-read a few seconds after
 `widescreen.cfg` changes, so switching between classic and modern controls in the launcher's Options
 window takes effect without restarting the client and without reinstalling or re-patching anything.
