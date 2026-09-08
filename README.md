@@ -66,7 +66,7 @@ Settings live in `widescreen.cfg`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `RightStickCamera` | `1` | Master on/off. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**, so players can choose classic or modern controls without editing anything. |
+| `RightStickCamera` | `1` | Master on/off — modern camera versus classic PSO. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**. Off means the plugin never patches anything, so the client's chase camera behaves exactly as it does without it. |
 | `RightStickSensitivity` | `100` | Percent. 100 = 100°/second at full deflection. |
 | `RightStickDeadzone` | `20` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
@@ -92,14 +92,25 @@ character with the other. An earlier build added a fixed *offset* to the chase c
 which meant the view swung around on its own as the chase camera re-aimed itself — mildly odd while
 exploring, actively harmful in combat.
 
-`RightStickFreezeChase` (on by default) takes the chase camera out of the picture almost entirely:
-once you take control, the eye holds the distance and height it had at that moment, so the camera
-simply orbits your character. Measured over a play session, the chase camera moves the eye's height
-barely at all (6–8 units) but swings its distance from 19 to 77 — that constant push-and-pull is
-what makes the camera feel like it is fighting you, and this is what stops it.
+**Enabled, the chase camera no longer drives.** The plugin takes the camera on the first frame and
+keeps it: the view holds the angle it is given and only the player changes it. It does not wait for
+you to touch the stick, and it does not hand control back after a recentre — either of those would
+put the chase camera back in charge, which is the thing this replaces.
 
-Note what it does **not** turn off, deliberately: the look-at point still tracks your character, and
-the client's own wall collision and camera smoothing still run downstream. Those are the parts of the
+`RightStickFreezeChase` (on by default) additionally holds the eye's **distance and height** at
+whatever they were when control was taken, so the camera simply orbits your character. Measured over
+a play session, the chase camera moves the eye's height barely at all (6–8 units) but swings its
+distance from 19 to 77 — that constant push-and-pull is what makes the camera feel like it is
+fighting you. Set it to `0` to let the chase camera keep choosing distance and height while the
+plugin still owns the angle.
+
+The held framing is recaptured in the two situations where it goes stale: **on a warp or area
+change** (detected as a one-frame jump in the look-at point — running measures ~1.5 units/frame, the
+threshold is 100, so only teleports trip it), and **on the recentre control**, which re-aims behind
+your character and stays engaged.
+
+Note what is **not** turned off, deliberately: the look-at point still tracks your character, and the
+client's own wall collision and camera smoothing still run downstream. Those are the parts of the
 chase camera worth keeping.
 
 `RightStickReturnSpeed` makes the held angle drift back toward the chase camera's while you move.
