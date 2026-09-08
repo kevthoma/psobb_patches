@@ -291,7 +291,9 @@ static DWORD g_frames = 0;
 // 📏 Running measures about 1.5 units/frame in our own logs, so 100 is ~60x clear of it.
 #define WARP_UNITS          100.0f
 static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
+static float g_target_move = 0.0f;       // this frame's look-at movement, computed ONCE per frame
 static int   g_have_prev_target = 0;
+static int   g_warped = 0;               // set when that movement looks like a teleport
 
 // Last-seen write time of widescreen.cfg, for live config reloads.
 static FILETIME g_cfg_mtime = { 0, 0 };
@@ -473,8 +475,6 @@ static float f_atan2(float y, float x) {
 #if RSC_DIAGNOSTIC
 // Previous frame's look-at point, so the periodic line can report how fast the chase camera's
 // target is actually travelling. Purely observational.
-static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
-static float g_target_move = 0.0f;
 #endif
 
 static float f_abs(float a) {
@@ -776,16 +776,20 @@ static void __cdecl on_camera_updated(void) {
   }
   g_recentre_held = recentre;
 
-#if RSC_DIAGNOSTIC
+  // How far the look-at point moved since last frame. Feeds both the diagnostic line and the warp
+  // check below, and is computed exactly once so those two can never disagree. Done BEFORE any early
+  // return, or a skipped frame would make the next delta an accumulated distance.
   {
-    // Track the look-at point every frame, not every sampled frame, or the reported speed would be
-    // a distance over 300 frames rather than one.
     float mx = tgt->x - g_prev_target.x;
     float my = tgt->y - g_prev_target.y;
     float mz = tgt->z - g_prev_target.z;
     g_target_move = f_sqrt(mx * mx + my * my + mz * mz);
+    g_warped = g_have_prev_target && (g_target_move > WARP_UNITS);
     g_prev_target = *tgt;
+    g_have_prev_target = 1;
   }
+
+#if RSC_DIAGNOSTIC
   if ((g_frames % RSC_DIAG_EVERY) == 0) {
     // Left half: is a pad seen, what does it read, is the state suppressed. Right half: what the
     // CHASE CAMERA itself is doing before we touch it -- its own yaw, how far back it is sitting,
@@ -827,19 +831,10 @@ static void __cdecl on_camera_updated(void) {
   // The chase camera's OWN yaw this frame -- where it wants the eye, before we say anything.
   auto_yaw = (h > 0.0f) ? f_atan2(vx, vz) : g_camera_yaw;
 
-  if (g_always_engaged) {
-    // Re-frame on a warp as well as on first engage: a new area is framed differently (measured,
-    // distance ~100 in the lobby against ~50 in a dungeon), so a held framing goes stale across one.
-    float mx = tgt->x - g_prev_target.x;
-    float my = tgt->y - g_prev_target.y;
-    float mz = tgt->z - g_prev_target.z;
-    int warped = g_have_prev_target && (f_sqrt(mx * mx + my * my + mz * mz) > WARP_UNITS);
-
-    if (!g_have_yaw || warped)
-      engage_camera(auto_yaw, h, vy);
-  }
-  g_prev_target = *tgt;
-  g_have_prev_target = 1;
+  // Re-frame on a warp as well as on first engage: a new area is framed differently (measured,
+  // distance ~100 in the lobby against ~50 in a dungeon), so a held framing goes stale across one.
+  if (g_always_engaged && (!g_have_yaw || g_warped))
+    engage_camera(auto_yaw, h, vy);
 
   if (have_pad) {
     // Negated after the first in-game session: pushing the stick right must swing the view right,
