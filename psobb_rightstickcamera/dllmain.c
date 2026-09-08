@@ -343,6 +343,9 @@ static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
 // after a zoom or an area change, which is exactly how RightStickFreezeChase misbehaved. A slow
 // filter tracks those changes without passing the jitter through. 3%/frame is a ~1s time constant.
 #define DEFAULT_DIST_SMOOTH 3
+// Look-at movement per frame below which we treat the character as at rest, for the purpose of
+// learning the resting camera distance. Running measures ~1.5 units/frame.
+#define DIST_LEARN_SPEED    0.5f
 static int   g_dist_smooth = DEFAULT_DIST_SMOOTH;  // RightStickDistanceSmooth
 static float g_smooth_h = 0.0f;
 static int   g_smooth_h_valid = 0;
@@ -1093,11 +1096,22 @@ static void __cdecl on_camera_updated(void) {
     g_eye_valid = 1;
   }
 
-  // Filter the distance we ask for. h is the chase camera's live preference and is jittery.
+  // ⭐ Learn the RESTING distance and hold it while moving.
+  //
+  // 📏 Measured across matched laps: the distance our chase camera asks for jumps from 51.9 standing
+  // still to 77.1 while running -- it pulls back with speed. Ephinea's does not: 45.4 still, 46.6
+  // moving, because their CameraZoom2 pins "distance behind the player" at 45.42 and holds it. That
+  // pull-back, not lag, is why our camera sat ~50% further out than theirs ever gets. (Lag is the
+  // other way round: their actual/commanded ratio while moving is 0.80, ours 0.92.)
+  //
+  // So only let the filter track while the character is essentially stationary. Running measures
+  // ~1.5 units/frame, so DIST_LEARN_SPEED at 0.5 admits standing and shuffling but not running. The
+  // effect is that zooming or changing area re-learns within a second of stopping, while a sprint
+  // across a map holds the framing the player last saw at rest.
   if (!g_smooth_h_valid) {
     g_smooth_h = h;
     g_smooth_h_valid = 1;
-  } else {
+  } else if (g_target_move < DIST_LEARN_SPEED) {
     g_smooth_h += (h - g_smooth_h) * ((float)g_dist_smooth / 100.0f);
   }
 
