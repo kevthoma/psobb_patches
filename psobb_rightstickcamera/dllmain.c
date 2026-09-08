@@ -135,11 +135,6 @@
 
 #define RSC_DIAG_EVERY      300          // frames between diagnostic lines -- see log.h
 
-// One-frame look-at movement above which this is a warp / area change / respawn rather than running,
-// and the held framing is recaptured. Running measures about 1.5 units per frame, so this sits a
-// factor of ~60 clear of anything the player can do on foot.
-#define WARP_UNITS          100.0f
-
 typedef struct { float x, y, z; } vec3f;
 
 // ⚠ Required because this is the first plugin in the repo to use floating point. MSVC emits a
@@ -382,12 +377,12 @@ static float f_atan2(float y, float x) {
   return r;
 }
 
-// Previous frame's look-at point. Two uses: the diagnostic line reports how fast the chase camera's
-// target is travelling, and -- more importantly -- a large one-frame jump means a warp or area
-// change, which is when the held framing has to be recaptured.
+#if RSC_DIAGNOSTIC
+// Previous frame's look-at point, so the periodic line can report how fast the chase camera's
+// target is actually travelling. Purely observational.
 static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
 static float g_target_move = 0.0f;
-static int   g_have_prev_target = 0;
+#endif
 
 static float f_abs(float a) {
   return a < 0.0f ? -a : a;
@@ -533,16 +528,6 @@ static void release_camera(void) {
   g_pitch_offset = 0.0f;
 }
 
-// Take the camera at the angle and framing the client currently has, so taking over is invisible.
-// Used at startup, after a warp or area change, and on the recentre control.
-static void engage_camera(float auto_yaw, float h, float vy) {
-  g_camera_yaw = auto_yaw;
-  g_hold_h = h;
-  g_hold_y = vy;
-  g_pitch_offset = 0.0f;
-  g_have_yaw = 1;
-}
-
 // ---------------------------------------------------------------------------
 // The hook body
 //
@@ -554,11 +539,12 @@ static void __cdecl on_camera_updated(void) {
   DWORD flags = *(DWORD*)ADDR_MENU_FLAGS;
   vec3f* src;
   vec3f* tgt;
-  float vx, vy, vz, h, r, auto_yaw;
-  float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
+  float vx, vy, vz, h, r;
   float yaw, hh, yy, s, c, nx, nz, nh, ny;
+  float rate = BASE_DEGREES * DEG2RAD * ((float)g_sensitivity / 100.0f);
   pad_state pad;
-  int have_pad, recentre, warped;
+  float auto_yaw;
+  int have_pad, recentre;
 
   g_frames++;
   if (!cam)
@@ -567,34 +553,56 @@ static void __cdecl on_camera_updated(void) {
   src = (vec3f*)(cam + OFF_DESIRED_SOURCE);
   tgt = (vec3f*)(cam + OFF_DESIRED_TARGET);
 
-  // How far the look-at point moved since last frame. Running measures about 1.5 units/frame, so
-  // anything near WARP_UNITS is a teleport, area change or respawn -- the moments when the framing
-  // we are holding is stale and must be recaptured. Tracked every frame, before any early return,
-  // or the "jump" after a skipped frame would be an accumulated distance rather than one frame's.
-  warped = 0;
-  {
-    float mx = tgt->x - g_prev_target.x;
-    float my = tgt->y - g_prev_target.y;
-    float mz = tgt->z - g_prev_target.z;
-    g_target_move = f_sqrt(mx * mx + my * my + mz * mz);
-    if (g_have_prev_target && g_target_move > WARP_UNITS)
-      warped = 1;
-    g_prev_target = *tgt;
-    g_have_prev_target = 1;
-  }
-
   // Read the pad exactly ONCE per frame. read_pad has side effects -- it caches the connected slot
   // and counts down the rescan backoff -- so calling it a second time just for the log would make
   // diagnostic builds behave differently from release ones.
   have_pad = read_pad(&pad);
-  recentre = have_pad && recentre_down(&pad);
 
-  // Cutscenes, teleports and menu states where the client snaps or freezes the camera. Hand control
-  // straight back rather than trying to hold an angle through them; we take it again on the next
-  // ordinary frame, at whatever angle the client left things.
+  // Recentre on the PRESS, not every frame the control is held: holding it would otherwise pin the
+  // offset at zero and make the stick appear dead.
+  recentre = have_pad && recentre_down(&pad);
+  if (recentre && !g_recentre_held) {
+    // Logged on the EDGE, not sampled: a press lasts a few frames, so the periodic line below will
+    // essentially never catch one. This is what confirms which control is actually bound.
+    rsc_diag("recentre fired (btn=%04X lt=%d rt=%d) -- released (was holding=%d yaw=%d/1000)",
+             pad.buttons, pad.lt, pad.rt, g_have_yaw, f_toint(g_camera_yaw * 1000.0f));
+    release_camera();
+  }
+  g_recentre_held = recentre;
+
+#if RSC_DIAGNOSTIC
+  {
+    // Track the look-at point every frame, not every sampled frame, or the reported speed would be
+    // a distance over 300 frames rather than one.
+    float mx = tgt->x - g_prev_target.x;
+    float my = tgt->y - g_prev_target.y;
+    float mz = tgt->z - g_prev_target.z;
+    g_target_move = f_sqrt(mx * mx + my * my + mz * mz);
+    g_prev_target = *tgt;
+  }
+  if ((g_frames % RSC_DIAG_EVERY) == 0) {
+    // Left half: is a pad seen, what does it read, is the state suppressed. Right half: what the
+    // CHASE CAMERA itself is doing before we touch it -- its own yaw, how far back it is sitting,
+    // and how fast its target is moving. If the camera still misbehaves, the cause is far more
+    // likely to be visible in those three than in our offset.
+    float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
+    rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
+             "menuflags=%08X | holding=%d yaw=%d/1000 pitch=%d/1000 | "
+             "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d",
+             g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
+             f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
+             flags, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
+             f_toint(g_pitch_offset * 1000.0f),
+             f_toint(f_atan2(ax, az) * 1000.0f), f_toint(f_sqrt(ax * ax + az * az)), f_toint(ay),
+             f_toint(g_target_move * 100.0f),
+             (g_freeze_chase && g_have_yaw) ? 1 : 0, f_toint(g_hold_h), f_toint(g_hold_y));
+  }
+#endif
+
+  // Cutscenes, teleports and menu states where the client snaps or freezes the camera. Hand
+  // control straight back rather than trying to hold an angle through them.
   if (flags & (DWORD)g_suppress) {
     release_camera();
-    g_recentre_held = recentre;
     return;
   }
 
@@ -613,40 +621,6 @@ static void __cdecl on_camera_updated(void) {
   // The chase camera's OWN yaw this frame -- where it wants the eye, before we say anything.
   auto_yaw = (h > 0.0f) ? f_atan2(vx, vz) : g_camera_yaw;
 
-  // Take control immediately and keep it, rather than waiting for the player to touch the stick.
-  // That is what "the chase camera is off" means: with the plugin enabled the camera holds the
-  // angle it is given and only the player changes it. Waiting for first touch left the chase camera
-  // driving until then, and driving again after every recentre.
-  //
-  // Recapture on a warp and on the recentre control. Both mean the framing being held is no longer
-  // the right one: a new area is framed differently (measured: distance 100 in the lobby against
-  // ~50 in a dungeon), and recentre is the player asking to be put back behind the character.
-  // Recentring re-aims and STAYS engaged -- it does not hand the camera back.
-  if (recentre && !g_recentre_held) {
-    rsc_diag("recentre fired (btn=%04X lt=%d rt=%d) -- re-aimed behind character",
-             pad.buttons, pad.lt, pad.rt);
-    engage_camera(auto_yaw, h, vy);
-  } else if (!g_have_yaw || warped) {
-    if (warped)
-      rsc_diag("warp: look-at jumped %d/100 units -- reframed", f_toint(g_target_move * 100.0f));
-    engage_camera(auto_yaw, h, vy);
-  }
-  g_recentre_held = recentre;
-
-#if RSC_DIAGNOSTIC
-  if ((g_frames % RSC_DIAG_EVERY) == 0) {
-    rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
-             "menuflags=%08X | holding=%d yaw=%d/1000 pitch=%d/1000 | "
-             "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d",
-             g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
-             f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
-             flags, g_have_yaw, f_toint(g_camera_yaw * 1000.0f), f_toint(g_pitch_offset * 1000.0f),
-             f_toint(auto_yaw * 1000.0f), f_toint(h), f_toint(vy),
-             f_toint(g_target_move * 100.0f),
-             (g_freeze_chase && g_have_yaw) ? 1 : 0, f_toint(g_hold_h), f_toint(g_hold_y));
-  }
-#endif
-
   if (have_pad) {
     // Negated after the first in-game session: pushing the stick right must swing the view right,
     // and the unnegated sense read backwards. RightStickInvertX now means "the other way from the
@@ -657,36 +631,62 @@ static void __cdecl on_camera_updated(void) {
     // RightStickInvertY then means what its name says.
     float steer_y = g_allow_pitch ? shape_axis(-pad.ry, g_invert_y) : 0.0f;
 
-    g_camera_yaw = wrap_angle(g_camera_yaw + steer_x * rate);
+    if (steer_x != 0.0f || steer_y != 0.0f) {
+      // Take control on first touch, seeded from wherever the chase camera currently is, so
+      // engaging never produces a jump.
+      if (!g_have_yaw) {
+        g_camera_yaw = auto_yaw;
+        g_hold_h = h;                    // whatever framing the chase camera had chosen, kept
+        g_hold_y = vy;
+        g_have_yaw = 1;
+      }
+      g_camera_yaw = wrap_angle(g_camera_yaw + steer_x * rate);
 
-    if (g_allow_pitch) {
-      g_pitch_offset += steer_y * rate;
-      if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
-      if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
-    }
-
-    // Optional drift back toward the chase camera's angle while moving and not steering. OFF by
-    // default: in combat it fights both the player and the chase camera, which is exactly what a
-    // held camera is supposed to prevent.
-    if (g_return_speed > 0 && steer_x == 0.0f) {
+      if (g_allow_pitch) {
+        g_pitch_offset += steer_y * rate;
+        if (g_pitch_offset >  PITCH_LIMIT_RAD) g_pitch_offset =  PITCH_LIMIT_RAD;
+        if (g_pitch_offset < -PITCH_LIMIT_RAD) g_pitch_offset = -PITCH_LIMIT_RAD;
+      }
+    } else if (g_return_speed > 0 && g_have_yaw) {
+      // Optional drift back to whatever the chase camera wants, while moving. OFF by default: in
+      // combat it fights both the player and the chase camera, which is exactly what a held camera
+      // is supposed to prevent.
       float move = move_magnitude(&pad);
 
       if (move > 0.0f) {
         float step = (float)g_return_speed * DEG2RAD / 30.0f * move;  // deg/s -> rad/frame at 30fps
         float delta = wrap_angle(g_camera_yaw - auto_yaw);
-        g_camera_yaw = wrap_angle(auto_yaw + decay_toward_zero(delta, step));
+
+        if (f_abs(delta) <= step && g_pitch_offset == 0.0f) {
+          release_camera();              // arrived: let the chase camera have it back outright
+        } else {
+          g_camera_yaw = wrap_angle(auto_yaw + decay_toward_zero(delta, step));
+          g_pitch_offset = decay_toward_zero(g_pitch_offset, step);
+        }
       }
     }
   }
 
-  // ABSOLUTE, not additive. Build the eye vector directly from the angle being held, so the result
-  // IS that angle regardless of what the chase camera chose this frame.
+  // Not holding an angle and no pitch applied: leave the chase camera's point byte-identical, so a
+  // player who never touches the right stick gets stock behaviour.
+  if (!g_have_yaw && g_pitch_offset == 0.0f)
+    return;
+
+  // ⭐ ABSOLUTE, not additive. Build the eye vector directly from the angle we are holding, so the
+  // result IS that angle regardless of what the chase camera chose this frame.
   //
-  // An earlier version added a fixed OFFSET to the chase camera's yaw. That is wrong for a camera
-  // you aim: the chase camera re-aims itself continuously as the character runs and turns, so the
-  // view swung around on its own with the stick untouched -- actively harmful in combat.
-  yaw = g_camera_yaw;
-  if (g_freeze_chase) {
+  // The additive version this replaced -- a fixed offset added to the chase camera's yaw -- is
+  // wrong for a camera you aim: the chase camera re-aims itself continuously as the character runs
+  // and turns, so the view swung around on its own with the stick untouched. In combat that is
+  // actively harmful. Holding an absolute world angle is what "rotate the camera with the right
+  // stick" actually means.
+  //
+  // Constructing the vector is exactly equivalent to rotating the chase camera's own vector by
+  // (held - auto), because such a rotation preserves horizontal distance and height and only sets
+  // the angle -- but written this way, freezing the framing is just a choice of which distance and
+  // height to feed in.
+  yaw = g_have_yaw ? g_camera_yaw : auto_yaw;
+  if (g_freeze_chase && g_have_yaw) {
     hh = g_hold_h;                       // orbit at the framing we took control at
     yy = g_hold_y;
   } else {
@@ -707,7 +707,9 @@ static void __cdecl on_camera_updated(void) {
     c = f_cos(g_pitch_offset);
     nh = hh * c - yy * s;
     ny = hh * s + yy * c;
-    // Refuse to pass the hard limit or to cross the axis.
+    // Refuse to pass the hard limit or to cross the axis. The accumulator clamp bounds only OUR
+    // contribution; the chase camera's own pitch rides underneath it, so the total needs its own
+    // stop. Rejecting the whole pitch step leaves yaw working, which is the half players notice.
     if (nh <= 0.0f || f_abs(ny) > PITCH_SIN_LIMIT * rr) {
       ny = yy;
     } else {
