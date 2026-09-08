@@ -332,6 +332,21 @@ static int g_chase_mode  = CHASE_HYBRID; // ChaseCam
 
 #define DEFAULT_YAW_LIMIT   180          // no cone: dragging the camera IS the snapping to avoid
 static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
+// ⭐ Smoothing on the distance we ask for, in percent-toward-target per frame. 100 = no smoothing.
+//
+// 📏 Measured over matched laps: Ephinea's camera distance lives in 24..54, ours in 11..96. The
+// cause is what we ASK for -- we passed the chase camera's live preferred distance straight through,
+// and that itself swings 32..77, so the client's lerp was chasing a target moving as fast as the
+// camera. Ephinea holds a stable ~45.4 (one of their fixed CameraZoom levels).
+//
+// Smoothing rather than freezing: a held value has to be captured at some moment and is then wrong
+// after a zoom or an area change, which is exactly how RightStickFreezeChase misbehaved. A slow
+// filter tracks those changes without passing the jitter through. 3%/frame is a ~1s time constant.
+#define DEFAULT_DIST_SMOOTH 3
+static int   g_dist_smooth = DEFAULT_DIST_SMOOTH;  // RightStickDistanceSmooth
+static float g_smooth_h = 0.0f;
+static int   g_smooth_h_valid = 0;
+
 static int g_follow_near = DEFAULT_FOLLOW_NEAR;  // RightStickFollowNear
 static int g_follow_far  = DEFAULT_FOLLOW_FAR;   // RightStickFollowFar
 
@@ -501,6 +516,9 @@ static void load_config(void) {
 
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
+  g_dist_smooth      = cfg_int(buf, got, "RightStickDistanceSmooth", g_dist_smooth);
+  if (g_dist_smooth < 1) g_dist_smooth = 1;
+  if (g_dist_smooth > 100) g_dist_smooth = 100;
   g_follow_near      = cfg_int(buf, got, "RightStickFollowNear", g_follow_near);
   g_follow_far       = cfg_int(buf, got, "RightStickFollowFar", g_follow_far);
   if (g_follow_near < 10) g_follow_near = 10;
@@ -765,6 +783,7 @@ static void engage_camera(float auto_yaw, float h, float vy) {
   g_hold_y = vy;
   g_have_yaw = 1;
   g_eye_valid = 0;                       // seeded from the client's own eye on the next frame
+  g_smooth_h_valid = 0;                  // and the distance filter starts from what it has now
 }
 
 static void release_camera(void) {
@@ -1074,13 +1093,21 @@ static void __cdecl on_camera_updated(void) {
     g_eye_valid = 1;
   }
 
+  // Filter the distance we ask for. h is the chase camera's live preference and is jittery.
+  if (!g_smooth_h_valid) {
+    g_smooth_h = h;
+    g_smooth_h_valid = 1;
+  } else {
+    g_smooth_h += (h - g_smooth_h) * ((float)g_dist_smooth / 100.0f);
+  }
+
   {
     float ex = g_eye.x - tgt->x;
     float ez = g_eye.z - tgt->z;
     float ey = g_eye.y - tgt->y;
     float elen = f_sqrt(ex * ex + ez * ez);
-    float near_d = h * (float)g_follow_near / 100.0f;
-    float far_d = h * (float)g_follow_far / 100.0f;
+    float near_d = g_smooth_h * (float)g_follow_near / 100.0f;
+    float far_d = g_smooth_h * (float)g_follow_far / 100.0f;
     float want = wrap_angle(g_camera_yaw - ((elen > 0.0f) ? f_atan2(ex, ez) : g_camera_yaw));
 
     // Steering orbits the eye about the character, preserving its distance.
@@ -1229,11 +1256,11 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[3] = { "enabled", "hybrid", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split,
+            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
