@@ -108,6 +108,7 @@
 #define OFF_SOURCE          0x178        // vec3f, current eye (lerped toward desired)
 #define OFF_TARGET          0x184        // vec3f, current look-at
 #define OFF_Y_ROTATION      0x194        // uint, PSO angle units -- OUTPUT ONLY, see header note
+#define OFF_LERP_SOURCE     0x1B8        // float; how fast camera_source chases desired_source
 #define OFF_DESIRED_SOURCE  0x1A0        // vec3f  <-- the one field this plugin writes
 #define OFF_DESIRED_TARGET  0x1AC        // vec3f, the pivot we rotate about
 
@@ -346,6 +347,20 @@ static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
 // Look-at movement per frame below which we treat the character as at rest, for the purpose of
 // learning the resting camera distance. Running measures ~1.5 units/frame.
 #define DIST_LEARN_SPEED    0.5f
+// ⭐ How fast the client's own lerp drags the camera to where we put it, in percent per frame.
+// 0 leaves the client's value alone.
+//
+// 📏 Measured: releasing the stick while stationary, our camera keeps turning 35.8 deg over 1441 ms;
+// Ephinea's stops after 1.9 deg -- ours overshoots ~19x further. The client's factor works out
+// around 2.3%/frame, a ~43 frame time constant, so while turning the camera runs roughly 36 degrees
+// behind the input and then spends a second and a half catching up. That is the "rubber band".
+//
+// Ephinea drives the camera position directly and does its own trailing, which is why their rotation
+// stops dead while their POSITION still lags (actual/commanded 0.80 while moving). We get the same
+// effect by making the client's lerp fast enough to stop being felt.
+#define DEFAULT_CAMERA_LERP 100
+static int   g_camera_lerp = DEFAULT_CAMERA_LERP;  // RightStickCameraLerp
+
 static int   g_dist_smooth = DEFAULT_DIST_SMOOTH;  // RightStickDistanceSmooth
 static float g_smooth_h = 0.0f;
 static int   g_smooth_h_valid = 0;
@@ -518,6 +533,9 @@ static void load_config(void) {
 
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
+  g_camera_lerp      = cfg_int(buf, got, "RightStickCameraLerp", g_camera_lerp);
+  if (g_camera_lerp < 0) g_camera_lerp = 0;
+  if (g_camera_lerp > 100) g_camera_lerp = 100;
   g_dist_smooth      = cfg_int(buf, got, "RightStickDistanceSmooth", g_dist_smooth);
   if (g_dist_smooth < 1) g_dist_smooth = 1;
   if (g_dist_smooth > 100) g_dist_smooth = 100;
@@ -1173,6 +1191,11 @@ static void __cdecl on_camera_updated(void) {
     }
   }
 
+  // Only while we are actually driving. Left alone, a player who never touches the right stick gets
+  // the client's own smoothing exactly as before.
+  if (g_camera_lerp > 0)
+    *(float*)(cam + OFF_LERP_SOURCE) = (float)g_camera_lerp / 100.0f;
+
   src->x = tgt->x + nx;
   src->y = tgt->y + ny;
   src->z = tgt->z + nz;
@@ -1269,11 +1292,11 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth,
+            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
