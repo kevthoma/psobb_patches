@@ -331,12 +331,21 @@ static int g_chase_mode  = CHASE_ENABLED; // ChaseCam
 // shrinking, exactly as Ephinea's "Chase Cam: Disabled" does. Only when they reach the near or far
 // edge does the camera move, and only enough to put them back on the edge.
 //
-// ⚠ This replaces rigid tracking, which was the real defect. Pinning the eye at target + offset
-// every frame welds the character to one screen position and pivots the entire world around them --
-// that is what made our fixed-angle mode "decidedly worse" than theirs despite having the same
-// fixed angle. Setting NEAR and FAR both to 100 restores that old rigid behaviour exactly.
-#define DEFAULT_FOLLOW_NEAR 60           // % of the chase camera's distance
-#define DEFAULT_FOLLOW_FAR  180
+// ⚠ The band was introduced because rigid tracking -- pinning the eye at target + offset every
+// frame -- welds the character to one screen position and pivots the world around them, which is
+// what made an early fixed-angle attempt read as "decidedly worse". NEAR = FAR = 100 is that rigid
+// behaviour.
+//
+// ⭐ DEFAULT IS NOW 100/100, i.e. the band is OFF. That earlier conclusion belongs to an
+// architecture we no longer use: back then we held a world POSITION and had no direct eye write, so
+// rigid tracking meant the camera could not lag at all. It now rotates the eye for angle while
+// leaving distance and height to the client, and every measurement taken on 2026-09-08 -- the 0.0
+// deg release drift, the zero collision yanks, the 29.4 minimum distance -- was taken at 100/100.
+//
+// ⚠ Ship what was measured. 60/180 has NOT been tested under the current scheme, so it is not the
+// safer choice merely for being the older one; it is the untested one. Revisit only with a trace.
+#define DEFAULT_FOLLOW_NEAR 100          // % of the chase camera's distance
+#define DEFAULT_FOLLOW_FAR  100
 
 #define DEFAULT_YAW_LIMIT   180          // no cone: dragging the camera IS the snapping to avoid
 static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
@@ -416,7 +425,9 @@ static int   g_eye_valid = 0;
 
 static int g_always_engaged = 0;         // RightStickAlwaysEngaged
 
-static int g_freeze_chase = 1;           // RightStickFreezeChase
+// ⚠ 0, not 1. Both branches of the ChaseCam block in load_config() set this to 0 before the config
+// key is read, so a 1 here was dead and merely advertised the opposite of what the plugin does.
+static int g_freeze_chase = 0;           // RightStickFreezeChase
 
 static int g_recentre_trigger = 1;       // RightStickRecentreTrigger: 0 none, 1 LT, 2 RT, 3 either
 static int g_recentre_mask    = 0;       // RightStickRecentreMask: raw XInput wButtons bitmask
