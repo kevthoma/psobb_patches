@@ -653,6 +653,21 @@ over 24 fits, and a live probe reads `+0x1BC` = **0.2890** bit-exact. One first-
 ⚠ `+0x1B8` and `+0x1BC` look like a pair and the obvious guess is source/target. Only `+0x1BC` moves
 the eye: `+0x1B8` was held at our own `1.0` for a whole session with no effect on the trailing.
 
+⛔ **The lag is load-bearing — do not remove it globally.** It is what keeps the eye from tracking the
+chase camera's commanded point through scenery. Forcing `+0x1BC` to 1.0 on every frame, measured on a
+lobby lap with the right stick **never touched**: minimum camera distance 3.9 with 11 samples under
+15 units and one 30.4-unit jump in a single frame, against zero yanks at the stock value.
+
+⭐ And Ephinea is **not** a low-lag camera — they lag *more* than the stock client while running:
+
+| yaw lag (camera behind commanded angle) | Ephinea | stock client |
+|---|---|---|
+| stationary, working the stick | +0.8° | +25.8° |
+| running, stick untouched | +22.1° | +17.3° |
+
+➡ Almost no lag on **stick-driven** rotation, normal chase lag on **movement-driven** following. Any
+override has to be gated on whether the stick is actually deflected this frame.
+
 ### Per-frame update, and the one hook site
 
 `UpdateDefaultNPCCameraState` @ `0x004D3ABC` (`__fastcall`, state in `ecx`, kept in `esi`):
