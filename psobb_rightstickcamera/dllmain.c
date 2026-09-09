@@ -381,6 +381,9 @@ static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
 //     table in the client map; 4.9 units cannot produce a 12x settling difference.
 #define DEFAULT_CAMERA_LERP 100
 static int   g_camera_lerp = DEFAULT_CAMERA_LERP;  // RightStickCameraLerp
+// Write camera_source directly on frames where the stick is deflected. 1 = on. Off falls back to
+// commanding desired_source only, which lags a constant ~25 deg behind the stick.
+static int   g_snap_steering = 1;                 // RightStickSnapWhileSteering
 static float g_stock_lerp = 0.0f;                 // the client's own value, learned not hardcoded
 static int   g_stock_lerp_valid = 0;
 static float g_last_lerp = 0.0f;                  // what we wrote last frame, to detect client writes
@@ -560,6 +563,7 @@ static void load_config(void) {
 
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
+  g_snap_steering    = cfg_int(buf, got, "RightStickSnapWhileSteering", g_snap_steering) ? 1 : 0;
   g_camera_lerp      = cfg_int(buf, got, "RightStickCameraLerp", g_camera_lerp);
   if (g_camera_lerp < 0) g_camera_lerp = 0;
   if (g_camera_lerp > 100) g_camera_lerp = 100;
@@ -1241,6 +1245,35 @@ static void __cdecl on_camera_updated(void) {
   src->x = tgt->x + nx;
   src->y = tgt->y + ny;
   src->z = tgt->z + nz;
+
+  // ⭐ While steering, put the EYE there too, not just the point we want it to head for.
+  //
+  // 📏 Why this and not the lerp factor: +0x1BC is genuinely the follow lerp -- overriding it takes
+  // the FOLLOWING lag from 17.3 deg to 0.0 -- but it does nothing for stick rotation. Probed live
+  // while the stick was held: +0x1BC reads 1.0000 exactly as we wrote it, and the camera still sits
+  // a constant 23-26 deg behind the commanded angle. Meanwhile the turn RATE matches the command
+  // almost exactly (commanded 171 deg/s, actual 167), so it is not a speed cap -- it is a fixed
+  // phase offset that a lerp of 1.0 cannot produce. The fast path in the client's camera update
+  // (0x004D3C98 / 0x004D3D14 / 0x004D3E90 -- "lerp or snap") must not be reading +0x1BC.
+  //
+  // Ephinea's stationary-rotation lag is 0.8 deg, which no lerp-based follow produces, so they are
+  // almost certainly writing the eye directly too.
+  //
+  // ⚠ ONLY while steering. Writing the eye every frame is the same mistake as forcing the lerp
+  // globally -- it removes the trailing that keeps the camera out of walls. On release we stop, and
+  // there is no jump to hide because the eye is already at the point we were commanding.
+  //
+  // Placed relative to the LIVE look-at (+0x184) rather than the desired one, so the framing stays
+  // correct against what the camera is actually pointed at -- the target has its own lerp (+0x1B8,
+  // observed 0.67) and lags the desired target slightly.
+  if (g_steering && g_snap_steering) {
+    vec3f* eye = (vec3f*)(cam + OFF_SOURCE);
+    vec3f* look = (vec3f*)(cam + OFF_TARGET);
+
+    eye->x = look->x + nx;
+    eye->y = look->y + ny;
+    eye->z = look->z + nz;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1334,11 +1367,11 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% snap=%d lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth, g_camera_lerp,
+            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth, g_snap_steering, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
