@@ -383,20 +383,6 @@ static int g_chase_mode  = CHASE_ENABLED; // ChaseCam
 
 #define DEFAULT_YAW_LIMIT   180          // no cone: dragging the camera IS the snapping to avoid
 static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
-// ⭐ Smoothing on the distance we ask for, in percent-toward-target per frame. 100 = no smoothing.
-//
-// 📏 Measured over matched laps: Ephinea's camera distance lives in 24..54, ours in 11..96. The
-// cause is what we ASK for -- we passed the chase camera's live preferred distance straight through,
-// and that itself swings 32..77, so the client's lerp was chasing a target moving as fast as the
-// camera. Ephinea holds a stable ~45.4 (one of their fixed CameraZoom levels).
-//
-// Smoothing rather than freezing: a held value has to be captured at some moment and is then wrong
-// after a zoom or an area change, which is exactly how RightStickFreezeChase misbehaved. A slow
-// filter tracks those changes without passing the jitter through. 3%/frame is a ~1s time constant.
-#define DEFAULT_DIST_SMOOTH 3
-// Look-at movement per frame below which we treat the character as at rest, for the purpose of
-// learning the resting camera distance. Running measures ~1.5 units/frame.
-#define DIST_LEARN_SPEED    0.5f
 // ⭐ How fast the client's own lerp (+0x1BC) drags the camera to where we put it, percent per frame,
 // applied ONLY on frames where the right stick is deflected. 0 disables the override entirely.
 //
@@ -445,9 +431,6 @@ static float g_stock_lerp = 0.0f;                 // the client's own value, lea
 static int   g_stock_lerp_valid = 0;
 static float g_last_lerp = 0.0f;                  // what we wrote last frame, to detect client writes
 
-static int   g_dist_smooth = DEFAULT_DIST_SMOOTH;  // RightStickDistanceSmooth
-static float g_smooth_h = 0.0f;
-static int   g_smooth_h_valid = 0;
 
 static int g_follow_near = DEFAULT_FOLLOW_NEAR;  // RightStickFollowNear
 static int g_follow_far  = DEFAULT_FOLLOW_FAR;   // RightStickFollowFar
@@ -481,6 +464,9 @@ static DWORD g_xi_rescan = 0;            // frames left before scanning slots ag
 // completely untouched, so a player who never uses the right stick gets stock behaviour.
 static float g_camera_yaw = 0.0f;        // radians, absolute
 static int   g_have_yaw   = 0;
+// Whether g_camera_yaw holds an angle worth keeping. Survives release_camera() so a transient
+// suppress (being hit) does not discard the player's angle; cleared on recentre and on a warp.
+static int   g_yaw_seeded = 0;
 // Set for the frames on which the right stick is actually deflected. NOT the same as g_have_yaw,
 // which stays set for as long as we hold an angle -- including a whole lap with the stick untouched.
 static int   g_steering   = 0;
@@ -633,9 +619,6 @@ static void load_config(void) {
   g_camera_lerp      = cfg_int(buf, got, "RightStickCameraLerp", g_camera_lerp);
   if (g_camera_lerp < 0) g_camera_lerp = 0;
   if (g_camera_lerp > 100) g_camera_lerp = 100;
-  g_dist_smooth      = cfg_int(buf, got, "RightStickDistanceSmooth", g_dist_smooth);
-  if (g_dist_smooth < 1) g_dist_smooth = 1;
-  if (g_dist_smooth > 100) g_dist_smooth = 100;
   g_follow_near      = cfg_int(buf, got, "RightStickFollowNear", g_follow_near);
   g_follow_far       = cfg_int(buf, got, "RightStickFollowFar", g_follow_far);
   if (g_follow_near < 10) g_follow_near = 10;
@@ -894,18 +877,30 @@ static float shape_axis(float v, int invert) {
 // by the optional drift-back once it arrives -- all of which mean the same thing: stop holding an
 // angle, and let the chase camera do exactly what it would have done without this plugin.
 // Take the camera at the angle and framing the client currently has, so taking over is invisible.
+// Take the camera at the chase camera's current angle. Used on the first engage, after a recentre,
+// and after a warp -- the three moments where the previously held angle is genuinely stale.
 static void engage_camera(float auto_yaw, float h, float vy) {
+  g_yaw_seeded = 1;
   g_camera_yaw = auto_yaw;
   g_hold_h = h;
   g_hold_y = vy;
   g_have_yaw = 1;
   g_eye_valid = 0;                       // seeded from the client's own eye on the next frame
-  g_smooth_h_valid = 0;                  // and the distance filter starts from what it has now
 }
 
 static void release_camera(void) {
   g_have_yaw = 0;
   g_pitch_offset = 0.0f;
+  // ⚠ g_yaw_seeded deliberately survives. A release is not always permanent: the suppress mask
+  // fires on transient client camera events, and getting hit is one of them. See resume_camera.
+}
+
+// Take the camera back at the angle we were already holding. The suppress mask releases on client
+// camera events, and in ChaseCam=Disabled the very next frame re-engages -- re-seeding from the
+// chase camera there is what swung the view round to face the character on every hit.
+static void resume_camera(void) {
+  g_have_yaw = 1;
+  g_eye_valid = 0;                       // re-seeded from the client's own eye next frame
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1046,8 @@ static void __cdecl on_camera_updated(void) {
     rsc_diag("recentre fired (btn=%04X lt=%d rt=%d) -- released (was holding=%d yaw=%d/1000)",
              pad.buttons, pad.lt, pad.rt, g_have_yaw, f_toint(g_camera_yaw * 1000.0f));
     release_camera();
+    g_yaw_seeded = 0;                    // recentre MUST re-seed -- taking the settled chase angle
+                                         // back is the entire point of the button
     g_recentring = 1;                    // hands off until the chase camera has finished the swing
     g_settle_count = 0;
     g_have_prev_auto = 0;
@@ -1153,8 +1150,12 @@ static void __cdecl on_camera_updated(void) {
   }
 
   // Re-engage only when we are not waiting for a recentre to finish.
-  if (g_always_engaged && !g_recentring && (!g_have_yaw || g_warped))
-    engage_camera(auto_yaw, h, vy);
+  if (g_always_engaged && !g_recentring && (!g_have_yaw || g_warped)) {
+    if (g_warped || !g_yaw_seeded)
+      engage_camera(auto_yaw, h, vy);    // genuinely stale: new area, or we never had an angle
+    else
+      resume_camera();                   // transient release (a hit): keep the angle we held
+  }
 
   if (have_pad) {
     // Negated after the first in-game session: pushing the stick right must swing the view right,
@@ -1233,32 +1234,39 @@ static void __cdecl on_camera_updated(void) {
     g_eye_valid = 1;
   }
 
-  // ⭐ Learn the RESTING distance and hold it while moving.
+  // ⛔ There was a "learn the resting distance and hold it while running" filter here. It was
+  // added because our chase camera pulls back with speed (51.9 standing, 77.1 running) where
+  // Ephinea's holds ~45.4, and holding a value looked like the way to match them.
   //
-  // 📏 Measured across matched laps: the distance our chase camera asks for jumps from 51.9 standing
-  // still to 77.1 while running -- it pulls back with speed. Ephinea's does not: 45.4 still, 46.6
-  // moving, because their CameraZoom2 pins "distance behind the player" at 45.42 and holds it. That
-  // pull-back, not lag, is why our camera sat ~50% further out than theirs ever gets. (Lag is the
-  // other way round: their actual/commanded ratio while moving is 0.80, ours 0.92.)
+  // It caused BOTH faults reported from play in ChaseCam=Disabled, where we are engaged
+  // continuously and so the filter was always in charge:
+  //   - the framing hopped between whatever it last grabbed. Commanded-distance plateaus across one
+  //     40s fight: 50.4, 117.0, 101.0, 61.1, 57.5, 107.1, 50.4, 102.3, 97.6, 72.7, 50.4.
+  //   - every hit threw the camera to a far view, because the suppress mask releases on the client's
+  //     own camera events and the re-engage re-seeded the filter from the damage framing
+  //     (50.1 -> 164.8 in one frame, with the character still).
   //
-  // So only let the filter track while the character is essentially stationary. Running measures
-  // ~1.5 units/frame, so DIST_LEARN_SPEED at 0.5 admits standing and shuffling but not running. The
-  // effect is that zooming or changing area re-learns within a second of stopping, while a sprint
-  // across a map holds the framing the player last saw at rest.
-  if (!g_smooth_h_valid) {
-    g_smooth_h = h;
-    g_smooth_h_valid = 1;
-  } else if (g_target_move < DIST_LEARN_SPEED) {
-    g_smooth_h += (h - g_smooth_h) * ((float)g_dist_smooth / 100.0f);
-  }
+  // Distance and height are the client's business. We hold the ANGLE and nothing else -- the same
+  // division that made stick rotation work. Do not reintroduce a distance of our own.
 
   {
     float ex = g_eye.x - tgt->x;
     float ez = g_eye.z - tgt->z;
     float ey = g_eye.y - tgt->y;
     float elen = f_sqrt(ex * ex + ez * ez);
-    float near_d = g_smooth_h * (float)g_follow_near / 100.0f;
-    float far_d = g_smooth_h * (float)g_follow_far / 100.0f;
+    // ⭐ h, the chase camera's CURRENT preferred distance -- not a value of our own.
+    //
+    // 📏 This used to be a filtered "resting distance" that only learned while the character stood
+    // still. In ChaseCam=Disabled, where we are engaged continuously, that produced both of the
+    // faults reported from play: the framing hopped between whatever it last grabbed (measured
+    // commanded-distance plateaus over one 40s fight: 50.4, 117.0, 101.0, 61.1, 57.5, 107.1, 50.4,
+    // 102.3, 97.6, 72.7, 50.4 -- "sometimes it zooms in, other times it zooms out"), and every hit
+    // threw it to a far view.
+    //
+    // Distance and height are the client's business; we only hold the ANGLE. That is the same
+    // division that made stick rotation work, applied to the desired point as well as the eye.
+    float near_d = h * (float)g_follow_near / 100.0f;
+    float far_d = h * (float)g_follow_far / 100.0f;
     float want = wrap_angle(g_camera_yaw - ((elen > 0.0f) ? f_atan2(ex, ez) : g_camera_yaw));
 
     // Steering orbits the eye about the character, preserving its distance.
@@ -1482,11 +1490,11 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth, g_snap_steering, g_snap_frames, g_camera_lerp,
+            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
