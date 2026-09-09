@@ -93,22 +93,33 @@
 
 #define ADDR_MENU_FLAGS     0x00A489FC   // g_GenericMenuSubSelection
 
-// ⭐ The camera's attached-object pointers. All three are NULL on the title screen and at character
-// select, and all three are live during play -- this is what "there is no character to follow" looks
-// like, and it is the honest test for "are we in a game".
+// ⭐ The camera's attached-object pointer: NULL whenever there is no character for the camera to
+// follow, which is the honest test for "are we in a game".
 //
-// 📏 Found by snapshotting the whole 0x1D4 struct 12 times in each state and keeping only the fields
-// that were CONSTANT within a state but DIFFERENT across them. The client allocates a SEPARATE camera
-// state for menus (a different heap pointer entirely), whose object slots are simply empty.
+// 📏 Measured across every non-gameplay screen. +0x090 is the ONLY field that separates all of them:
+//
+//   screen                    +0x084   +0x090   +0x1C4   camera struct
+//   title / character select   NULL     NULL     NULL    separate MENU allocation
+//   ship / block select        live    *NULL*    live    the gameplay allocation
+//   loading                    live    *NULL*    live    the gameplay allocation
+//   lobby, in game             live     live     live    the gameplay allocation
+//
+// ⚠ An earlier version of this guard required all THREE to be null. That is the menu camera's
+// signature, so it fixed the title screen and character select while ship select and the loading
+// screen kept responding to the stick -- both of those run on the GAMEPLAY camera struct with only
+// +0x090 empty. Confirmed in game.
+//
+// Found by snapshotting the whole 0x1D4 struct repeatedly in each state and keeping only the fields
+// that were CONSTANT within a state but DIFFERENT across them.
 //
 // ⚠ Why not the obvious alternatives: `g_GenericMenuSubSelection` does not separate the two -- the
 // title screen reads 0x604 and character select 0x204, and both of those also occur during ordinary
 // play (see DEFAULT_SUPPRESS below; suppressing on bit 0x4 is what disabled the whole feature in the
 // first build). The heap pointer itself is not stable across runs. And "look-at is at the origin"
 // looks tempting but is wrong: the lobby sits at x = 0.0 exactly.
-#define OFF_ATTACH_A        0x084        // object pointer, NULL outside a game
-#define OFF_ATTACH_B        0x090        // second object pointer, NULL outside a game
-#define OFF_ATTACH_C        0x1C4        // same value as +0x084 in game, NULL outside
+#define OFF_ATTACH          0x090        // object pointer; NULL whenever there is no character
+// (+0x084 and +0x1C4 are two more object pointers. They are null on the MENU camera but still live
+// on ship select and the loading screen, so they do not separate those -- see below.)
 // ⛔ NOT USED, and deliberately so. g_joyState (DIJOYSTATE2, 0x110 bytes) lives at 0x00ADCC80, and
 // the first two builds read the right stick from it. It does not work: it is the PAD CONFIG SCREEN'S
 // BINDING-CAPTURE BUFFER, not gameplay input. Proof in our own binary -- the only three references to
@@ -253,8 +264,11 @@ static int g_invert_y    = 0;            // RightStickInvertY
 static int g_allow_pitch = 0;            // RightStickPitch
 static int g_suppress    = DEFAULT_SUPPRESS;
 // Off switch for the not-in-a-game guard above, in case a map ever turns up where the attachment
-// slots are empty during real play.
+// slot is empty during real play.
 static int g_attach_guard = 1;           // RightStickRequireAttachedCamera
+#define DEFAULT_ATTACH_FRAMES 10         // ~0.3s before we believe the camera has nothing to follow
+static int g_attach_frames = DEFAULT_ATTACH_FRAMES;  // RightStickAttachedFrames
+static int g_detached = 0;               // consecutive frames with no attached object
 
 // Recentring. The client's own Camera binding (PAD BUTTON7 in the default pad config) re-aims the
 // chase camera behind the character -- but our offset is added on top of that, so without clearing
@@ -590,6 +604,9 @@ static void load_config(void) {
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
   g_attach_guard = cfg_int(buf, got, "RightStickRequireAttachedCamera", g_attach_guard) ? 1 : 0;
+  g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
+  if (g_attach_frames < 1) g_attach_frames = 1;
+  if (g_attach_frames > 300) g_attach_frames = 300;
   // The mode first: it sets the defaults that the individual keys below may then override.
   g_chase_mode = cfg_int(buf, got, "ChaseCam", g_chase_mode);
   // ⚠ 2 was "Disabled" in the old three-mode list (Enabled/Hybrid/Disabled). Migrate it rather than
@@ -1073,19 +1090,24 @@ static void __cdecl on_camera_updated(void) {
   }
 #endif
 
-  // ⭐ Not in a game at all -- title screen, character select, and anything else running on the
-  // client's separate menu camera. Driving those was a real bug: the right stick swung the title
-  // screen and character select around.
+  // ⭐ Not in a game -- title, character select, ship/block select, loading. Driving those was a
+  // real bug: the right stick swung all four around.
   //
-  // Deliberately requires ALL THREE slots to be empty. That is the unambiguous menu signature; a
-  // single null could plausibly occur for a frame during a load or a warp, and treating that as
-  // "not in a game" would disable the camera in a real map, which is the worse failure.
-  if (g_attach_guard &&
-      *(DWORD*)(cam + OFF_ATTACH_A) == 0 &&
-      *(DWORD*)(cam + OFF_ATTACH_B) == 0 &&
-      *(DWORD*)(cam + OFF_ATTACH_C) == 0) {
-    release_camera();
-    return;
+  // ⚠ DEBOUNCED rather than acted on immediately. The risk with a single pointer is a transient null
+  // during a warp or an area load, which would drop the held angle mid-play; requiring it to stay
+  // null for several consecutive frames keeps that harmless, and costs only a few frames of the
+  // stick still working on a screen that lasts seconds. Measured: +0x090 was live for all 125
+  // consecutive lobby samples (~62s) and null for every sample on every non-gameplay screen.
+  if (g_attach_guard) {
+    if (*(DWORD*)(cam + OFF_ATTACH) == 0) {
+      if (g_detached < g_attach_frames) g_detached++;
+    } else {
+      g_detached = 0;
+    }
+    if (g_detached >= g_attach_frames) {
+      release_camera();
+      return;
+    }
   }
 
   // Cutscenes, teleports and menu states where the client snaps or freezes the camera. Hand
