@@ -410,6 +410,11 @@ namespace Corellia
         };
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin,
                  cbRememberParty, cbRightStick;
+        CheckBox cbSkipLauncher; // Proton only -- see the RunningUnderWine block
+        Label lblSkipHint;
+        bool soundHidden;        // running under Proton: the sliders drive a proxy that is not there
+        int soundShift;
+        int extraRows;           // height added back for controls that only exist under Proton
         TrackBar tbMaster, tbMusic, tbEffects;
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
@@ -488,6 +493,23 @@ namespace Corellia
 
         [DllImport("user32.dll", CharSet = CharSet.Ansi)]
         static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
+        static extern IntPtr GetModuleHandleA(string name);
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
+        static extern IntPtr GetProcAddress(IntPtr module, string proc);
+
+        // Wine (and therefore Proton) exports wine_get_version from ntdll; Windows does not. This is
+        // the conventional check and does not depend on a version string or an environment variable.
+        static bool RunningUnderWine()
+        {
+            try
+            {
+                IntPtr ntdll = GetModuleHandleA("ntdll.dll");
+                return ntdll != IntPtr.Zero && GetProcAddress(ntdll, "wine_get_version") != IntPtr.Zero;
+            }
+            catch { return false; }   // if the probe itself fails, assume Windows and show everything
+        }
 
         // In-game font, stored as the game's own FONT_JPN registry string. "System" is a Windows
         // alias that always resolves, so it is both the default and the safe fallback; the rest are
@@ -674,7 +696,45 @@ namespace Corellia
                                              Location = new Point(24, 642), AutoSize = true };
             Controls.Add(cbRememberParty);
 
+            // On the Deck the sound sliders drive a proxy that is not there, so hide them rather
+            // than offer controls that quietly do nothing. Measured from the layout instead of a
+            // hardcoded number, so moving the groups around cannot silently leave a hole.
+            if (RunningUnderWine())
+            {
+                int shift = gSound.Height + (gSound.Top - (gSharp.Top + gSharp.Height));
+                gSound.Visible = false;
+                // ⚠ gPad, not cbController: the controller prompts checkbox now lives INSIDE the
+                // Controller Settings group, so its Location is relative to that group. Shifting
+                // the child would move it within the box and leave the box itself behind.
+                foreach (var c in new Control[] { gPad, cbSaveLogin, cbRememberParty })
+                    c.Location = new Point(c.Location.X, c.Location.Y - shift);
+                ClientSize = new Size(ClientSize.Width, ClientSize.Height - shift);
+                soundHidden = true;
+                soundShift = shift;
+
+                // Steam Deck only. The launcher is skipped by corellia-launch.sh rewriting the
+                // executable Steam hands over -- the shortcut still names online_e.exe, so the appid
+                // and the Proton prefix are untouched and this is free to toggle either way.
+                //
+                // Safe to offer here precisely BECAUSE this is Proton: the Options entry in the
+                // application menu still reaches this setting once the launcher is being skipped.
+                // On Windows the same checkbox could hide the only route back to itself, which is
+                // why it is not created there at all.
+                int y = cbRememberParty.Location.Y + 24;
+                cbSkipLauncher = new CheckBox { Text = "Skip the launcher (start the game directly)",
+                                                Location = new Point(24, y), AutoSize = true };
+                lblSkipHint = new Label { Text = "Re-enable from the Corellia Options entry in the application menu.",
+                                          Location = new Point(42, y + 20), AutoSize = true,
+                                          ForeColor = SystemColors.GrayText };
+                Controls.Add(cbSkipLauncher);
+                Controls.Add(lblSkipHint);
+                extraRows = 44;
+                ClientSize = new Size(ClientSize.Width, ClientSize.Height + extraRows);
+            }
+
             var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 672), Size = new Size(130, 44) };
+            if (soundHidden)
+                btnSave.Location = new Point(btnSave.Location.X, btnSave.Location.Y - soundShift + extraRows);
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -811,6 +871,8 @@ namespace Corellia
             if (chase < 0 || chase >= ChaseCamNames.Length) chase = 0;
             cboChaseCam.SelectedIndex = chase;
             cboChaseCam.Enabled = cbRightStick.Checked;
+            if (cbSkipLauncher != null)
+                cbSkipLauncher.Checked = AsBool(d, "SkipLauncher", false);
 
             // Default to the desktop size rather than a fixed one: it is the only size guaranteed
             // to be a real display mode on this machine.
@@ -889,9 +951,19 @@ namespace Corellia
             SetKey(lines, "RememberPartyInfo", cbRememberParty.Checked ? "1" : "0");
             SetKey(lines, "RightStickCamera", cbRightStick.Checked ? "1" : "0");
             SetKey(lines, "ChaseCam", Math.Max(0, cboChaseCam.SelectedIndex).ToString());
-            SetKey(lines, "MasterVolume", tbMaster.Value.ToString());
-            SetKey(lines, "MusicVolume", tbMusic.Value.ToString());
-            SetKey(lines, "EffectVolume", tbEffects.Value.ToString());
+            // Only written where the checkbox exists. On Windows the key is left exactly as found,
+            // so an install directory shared with a Deck cannot have its choice silently cleared.
+            if (cbSkipLauncher != null)
+                SetKey(lines, "SkipLauncher", cbSkipLauncher.Checked ? "1" : "0");
+            // Not written when the group was hidden: the values were never shown, so saving them
+            // would silently rewrite whatever the file already held on behalf of a control the
+            // player could not see.
+            if (!soundHidden)
+            {
+                SetKey(lines, "MasterVolume", tbMaster.Value.ToString());
+                SetKey(lines, "MusicVolume", tbMusic.Value.ToString());
+                SetKey(lines, "EffectVolume", tbEffects.Value.ToString());
+            }
             // HUD scaling is entangled with the widescreen layout math in the wrapper (non-1.0
             // leaves a seam), so it's not exposed — lock it to the value that renders correctly.
             SetKey(lines, "HUDScale", "1.0");
