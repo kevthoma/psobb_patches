@@ -668,6 +668,19 @@ lobby lap with the right stick **never touched**: minimum camera distance 3.9 wi
 ➡ Almost no lag on **stick-driven** rotation, normal chase lag on **movement-driven** following. Any
 override has to be gated on whether the stick is actually deflected this frame.
 
+### ✅ The working recipe (2026-09-08)
+
+1. Write `camera_desired_source` (+0x1A0) at the held angle.
+2. **While the stick is deflected**, also rotate `camera_source` (+0x178) onto that angle,
+   **preserving the eye's current distance and height**, eased in over ~5 frames.
+3. Leave `+0x1BC` alone.
+
+Measured: **0.0° drift and 0 ms settle** on release (Ephinea 6.0° / 376 ms), and on a lobby lap with
+34% stick-on, **min distance 29.4 with zero collision yanks** — further from geometry than Ephinea.
+
+⛔ Overriding `+0x1BC` instead takes min distance to **1.3** with **6 yanks** and a 50.7-unit
+single-frame jump. It is the distance/collision smoothing, and it is load-bearing.
+
 ### Per-frame update, and the one hook site
 
 `UpdateDefaultNPCCameraState` @ `0x004D3ABC` (`__fastcall`, state in `ecx`, kept in `esi`):
