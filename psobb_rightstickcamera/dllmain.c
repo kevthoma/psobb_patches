@@ -1058,12 +1058,27 @@ static void __cdecl on_camera_updated(void) {
   // check below, and is computed exactly once so those two can never disagree. Done BEFORE any early
   // return, or a skipped frame would make the next delta an accumulated distance.
   {
-    float mx = tgt->x - g_prev_target.x;
-    float my = tgt->y - g_prev_target.y;
-    float mz = tgt->z - g_prev_target.z;
+    // ⭐ The LIVE look-at (+0x184), NOT the desired one we are about to write.
+    //
+    // ⛔ This used to measure `tgt`, the DESIRED look-at (+0x1AC), and that made every enemy hit
+    // look like a teleport. The client throws its desired look-at a long way during damage
+    // reactions; the live one is lerped (+0x1B8, ~0.67) and stays smooth. Measured over a Forest
+    // fight, movement per 50ms sample:
+    //
+    //     live    (+0x184)   median 0.23   p99  6.12   max  18.35
+    //     desired (+0x1AC)   median 0.00   p99 63.72   max 187.11
+    //
+    // So a 100-unit threshold has a wide margin on the live point and none at all on the desired
+    // one. The symptom was the camera re-seeding its angle on every hit -- a single-frame step of
+    // +165 deg and +129 deg in one trace, exactly on the knockback frame.
+    vec3f* live_tgt = (vec3f*)(cam + OFF_TARGET);
+    float mx = live_tgt->x - g_prev_target.x;
+    float my = live_tgt->y - g_prev_target.y;
+    float mz = live_tgt->z - g_prev_target.z;
+
     g_target_move = f_sqrt(mx * mx + my * my + mz * mz);
     g_warped = g_have_prev_target && (g_target_move > WARP_UNITS);
-    g_prev_target = *tgt;
+    g_prev_target = *live_tgt;
     g_have_prev_target = 1;
   }
 
