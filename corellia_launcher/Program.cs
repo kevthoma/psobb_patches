@@ -403,8 +403,11 @@ namespace Corellia
         readonly List<int> offeredModes = new List<int>();
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin,
                  cbRememberParty;
+        CheckBox cbSkipLauncher; // Proton only -- see the RunningUnderWine block
+        Label lblSkipHint;
         bool soundHidden;        // running under Proton: the sliders drive a proxy that is not there
         int soundShift;
+        int extraRows;           // height added back for controls that only exist under Proton
         TrackBar tbMaster, tbMusic, tbEffects;
 
         // The game stores login under HKCU\Software\SonicTeam\PSOBB; these DWORD flags are what the
@@ -676,11 +679,30 @@ namespace Corellia
                 ClientSize = new Size(ClientSize.Width, ClientSize.Height - shift);
                 soundHidden = true;
                 soundShift = shift;
+
+                // Steam Deck only. The launcher is skipped by corellia-launch.sh rewriting the
+                // executable Steam hands over -- the shortcut still names online_e.exe, so the appid
+                // and the Proton prefix are untouched and this is free to toggle either way.
+                //
+                // Safe to offer here precisely BECAUSE this is Proton: the Options entry in the
+                // application menu still reaches this setting once the launcher is being skipped.
+                // On Windows the same checkbox could hide the only route back to itself, which is
+                // why it is not created there at all.
+                int y = cbRememberParty.Location.Y + 24;
+                cbSkipLauncher = new CheckBox { Text = "Skip the launcher (start the game directly)",
+                                                Location = new Point(24, y), AutoSize = true };
+                lblSkipHint = new Label { Text = "Re-enable from the Corellia Options entry in the application menu.",
+                                          Location = new Point(42, y + 20), AutoSize = true,
+                                          ForeColor = SystemColors.GrayText };
+                Controls.Add(cbSkipLauncher);
+                Controls.Add(lblSkipHint);
+                extraRows = 44;
+                ClientSize = new Size(ClientSize.Width, ClientSize.Height + extraRows);
             }
 
             var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 568), Size = new Size(130, 44) };
             if (soundHidden)
-                btnSave.Location = new Point(btnSave.Location.X, btnSave.Location.Y - soundShift);
+                btnSave.Location = new Point(btnSave.Location.X, btnSave.Location.Y - soundShift + extraRows);
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
             btnSave.Click += OnSaveClose;
             Controls.Add(btnSave);
@@ -806,6 +828,8 @@ namespace Corellia
             cbController.Checked = AsBool(d, "ControllerPrompts", true);
             cbSaveLogin.Checked = ReadSaveLogin();
             cbRememberParty.Checked = AsBool(d, "RememberPartyInfo", false);
+            if (cbSkipLauncher != null)
+                cbSkipLauncher.Checked = AsBool(d, "SkipLauncher", false);
 
             // Default to the desktop size rather than a fixed one: it is the only size guaranteed
             // to be a real display mode on this machine.
@@ -882,6 +906,10 @@ namespace Corellia
             SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.25");
             SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
             SetKey(lines, "RememberPartyInfo", cbRememberParty.Checked ? "1" : "0");
+            // Only written where the checkbox exists. On Windows the key is left exactly as found,
+            // so an install directory shared with a Deck cannot have its choice silently cleared.
+            if (cbSkipLauncher != null)
+                SetKey(lines, "SkipLauncher", cbSkipLauncher.Checked ? "1" : "0");
             // Not written when the group was hidden: the values were never shown, so saving them
             // would silently rewrite whatever the file already held on behalf of a control the
             // player could not see.
