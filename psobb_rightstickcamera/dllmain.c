@@ -354,26 +354,36 @@ static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
 // Look-at movement per frame below which we treat the character as at rest, for the purpose of
 // learning the resting camera distance. Running measures ~1.5 units/frame.
 #define DIST_LEARN_SPEED    0.5f
-// ⭐ How fast the client's own lerp drags the camera to where we put it, in percent per frame.
-// 0 leaves the client's value alone.
+// ⭐ How fast the client's own lerp (+0x1BC) drags the camera to where we put it, percent per frame,
+// applied ONLY on frames where the right stick is deflected. 0 disables the override entirely.
 //
-// 📏 Measured: releasing the stick while stationary, our camera keeps turning ~23 deg over ~700 ms;
-// Ephinea's stops after 1.9 deg. The cause is not overshoot and not wall collision -- it is a plain
-// first-order lag at 0.289/frame. While the stick is held the camera sits a steady 25.8 deg and 11%
-// of its distance BEHIND what we command, and on release it unwinds. That is the "rubber band", and
-// it is one lag showing up in two axes at once.
+// 📏 The client's stock value is 0.2890/frame. Measured against Ephinea, and the two cases differ:
 //
-// ⛔ Two dead ends, both refuted by measurement, do not revisit them:
-//   - "the camera is being displaced by map geometry" -- the trace above was taken standing still in
-//     the middle of an open Forest room with nothing to collide with, and character speed was 0.00
-//     for all 396 samples. Same 23 deg tail.
-//   - "our zoom level sits further out than theirs" -- ours is 50.3 at Zoom 2 against their 45.4.
-//     4.9 units cannot produce a 12x settling difference. See the zoom table in the client map.
+//                              yaw lag (actual camera angle behind the commanded one)
+//     stationary, working the stick     Ephinea  +0.8 deg     us, stock lerp  +25.8 deg
+//     running, stick untouched          Ephinea +22.1 deg     us, stock lerp  +17.3 deg
 //
-// ⚠ The first version of this override wrote +0x1B8 and only appeared to help (35.8 -> 23.6 deg,
-// which was really run-to-run variation). Writing +0x1BC is what actually addresses it.
+// ⭐ So Ephinea is NOT a low-lag camera. They lag MORE than us while running. What they do is apply
+// almost no lag to STICK-DRIVEN rotation and normal chase lag to MOVEMENT-DRIVEN following. That
+// split is the whole difference in feel, and one global lerp value cannot express it.
+//
+// ⛔ Forcing the lerp to 1.0 on every frame -- which is what the first version of this did -- makes
+// the follow snap straight to the chase camera's commanded point, and that point goes through
+// scenery. Measured on a lobby lap with the stick NEVER touched (|stick| = 0.03 for all 471
+// samples): camera distance fell to 3.9 with 11 samples under 15 units and one 30.4-unit jump in a
+// single frame, against zero yanks both for our previous build and for Ephinea. The lag is
+// load-bearing -- it is what keeps the eye out of walls. Gate the override on g_steering.
+//
+// ⛔ Two further explanations for the post-release tail, both refuted, do not retry them:
+//   - "map geometry is displacing the camera" -- the lag was measured standing still in the middle
+//     of an open Forest room, character speed 0.00 across all 396 samples. Same tail.
+//   - "our zoom sits further out than theirs" -- 50.3 against their 45.4 at Zoom 2. See the zoom
+//     table in the client map; 4.9 units cannot produce a 12x settling difference.
 #define DEFAULT_CAMERA_LERP 100
 static int   g_camera_lerp = DEFAULT_CAMERA_LERP;  // RightStickCameraLerp
+static float g_stock_lerp = 0.0f;                 // the client's own value, learned not hardcoded
+static int   g_stock_lerp_valid = 0;
+static float g_last_lerp = 0.0f;                  // what we wrote last frame, to detect client writes
 
 static int   g_dist_smooth = DEFAULT_DIST_SMOOTH;  // RightStickDistanceSmooth
 static float g_smooth_h = 0.0f;
@@ -409,6 +419,9 @@ static DWORD g_xi_rescan = 0;            // frames left before scanning slots ag
 // completely untouched, so a player who never uses the right stick gets stock behaviour.
 static float g_camera_yaw = 0.0f;        // radians, absolute
 static int   g_have_yaw   = 0;
+// Set for the frames on which the right stick is actually deflected. NOT the same as g_have_yaw,
+// which stays set for as long as we hold an angle -- including a whole lap with the stick untouched.
+static int   g_steering   = 0;
 // Eye framing captured when control was taken, used only when g_freeze_chase is on.
 static float g_hold_h     = 0.0f;        // horizontal distance from target to eye
 static float g_hold_y     = 0.0f;        // height of the eye above the target
@@ -1026,6 +1039,8 @@ static void __cdecl on_camera_updated(void) {
   if (r <= 0.0f)
     return;                              // source and target coincide; the client fixes this itself
 
+  g_steering = 0;                        // set again below only if the stick is deflected this frame
+
   // The chase camera's OWN yaw this frame -- where it wants the eye, before we say anything.
   auto_yaw = (h > 0.0f) ? f_atan2(vx, vz) : g_camera_yaw;
 
@@ -1062,6 +1077,7 @@ static void __cdecl on_camera_updated(void) {
     float steer_y = g_allow_pitch ? shape_axis(-pad.ry, g_invert_y) : 0.0f;
 
     if (steer_x != 0.0f || steer_y != 0.0f) {
+      g_steering = 1;                    // gates the lerp override -- see the note above OFF_LERP_SOURCE
       g_recentring = 0;                  // the player wants it now; stop waiting for the chase cam
       // Take control on first touch, seeded from wherever the chase camera currently is, so
       // engaging never produces a jump.
@@ -1207,10 +1223,19 @@ static void __cdecl on_camera_updated(void) {
 
   // Only while we are actually driving. Left alone, a player who never touches the right stick gets
   // the client's own smoothing exactly as before.
+  // ⭐ ONLY while the stick is actually deflected. See the note above OFF_LERP_SOURCE: the client's
+  // lag is load-bearing for the FOLLOW, and removing it globally is what broke the lobby lap.
   if (g_camera_lerp > 0) {
-    float k = (float)g_camera_lerp / 100.0f;
-    *(float*)(cam + OFF_LERP_SOURCE) = k;   // +0x1BC -- the one that matters
-    *(float*)(cam + OFF_LERP_A) = k;        // +0x1B8 -- harmless, and kept so the pair stays coherent
+    float cur = *(float*)(cam + OFF_LERP_SOURCE);
+    // Learn the client's own value by watching for any frame where it is not what we last wrote.
+    // Learning it rather than hardcoding 0.289 keeps working if the client varies it by area or
+    // camera mode, which we have not ruled out.
+    if (!g_stock_lerp_valid || cur != g_last_lerp) {
+      g_stock_lerp = cur;
+      g_stock_lerp_valid = 1;
+    }
+    g_last_lerp = g_steering ? ((float)g_camera_lerp / 100.0f) : g_stock_lerp;
+    *(float*)(cam + OFF_LERP_SOURCE) = g_last_lerp;
   }
 
   src->x = tgt->x + nx;
