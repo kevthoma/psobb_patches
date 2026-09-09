@@ -379,11 +379,25 @@ static int g_yaw_limit = DEFAULT_YAW_LIMIT;      // RightStickYawLimit
 //     of an open Forest room, character speed 0.00 across all 396 samples. Same tail.
 //   - "our zoom sits further out than theirs" -- 50.3 against their 45.4 at Zoom 2. See the zoom
 //     table in the client map; 4.9 units cannot produce a 12x settling difference.
-#define DEFAULT_CAMERA_LERP 100
+// ⛔ DEFAULT 0 (off). This knob was added to fix the ANGULAR lag and never did -- the client's fast
+// path does not read +0x1BC, proved by probing the field at 1.0000 while the camera still trailed
+// 26 deg. The angle is handled by the direct rotation below instead.
+//
+// What it DOES reach is the distance/collision path, and there it only does harm: forcing it to 1.0
+// makes the client's collision recovery instant, so the camera pops out the moment an obstruction
+// clears. Measured standing still and merely rotating: worst single-frame distance step 20.5 units,
+// against 3.1 for Ephinea. Left at 0 the client eases that recovery itself, which is what we want.
+#define DEFAULT_CAMERA_LERP 0
 static int   g_camera_lerp = DEFAULT_CAMERA_LERP;  // RightStickCameraLerp
 // Write camera_source directly on frames where the stick is deflected. 1 = on. Off falls back to
 // commanding desired_source only, which lags a constant ~25 deg behind the stick.
 static int   g_snap_steering = 1;                 // RightStickSnapWhileSteering
+// Frames to ease the eye onto the commanded angle when steering begins. Without this, engaging
+// rotates the eye by the whole accumulated follow lag in ONE frame -- about 10.8 deg, which at a
+// radius of 47 moves the camera 8.8 units sideways and reads as a whip. 5 frames is ~0.17s.
+#define DEFAULT_SNAP_FRAMES 5
+static int   g_snap_frames = DEFAULT_SNAP_FRAMES; // RightStickSnapFrames
+static float g_snap_ramp = 0.0f;                  // 0..1, rebuilt each time steering starts
 static float g_stock_lerp = 0.0f;                 // the client's own value, learned not hardcoded
 static int   g_stock_lerp_valid = 0;
 static float g_last_lerp = 0.0f;                  // what we wrote last frame, to detect client writes
@@ -564,6 +578,9 @@ static void load_config(void) {
   g_freeze_chase     = cfg_int(buf, got, "RightStickFreezeChase", g_freeze_chase) ? 1 : 0;
   g_always_engaged   = cfg_int(buf, got, "RightStickAlwaysEngaged", g_always_engaged) ? 1 : 0;
   g_snap_steering    = cfg_int(buf, got, "RightStickSnapWhileSteering", g_snap_steering) ? 1 : 0;
+  g_snap_frames      = cfg_int(buf, got, "RightStickSnapFrames", g_snap_frames);
+  if (g_snap_frames < 1) g_snap_frames = 1;
+  if (g_snap_frames > 60) g_snap_frames = 60;
   g_camera_lerp      = cfg_int(buf, got, "RightStickCameraLerp", g_camera_lerp);
   if (g_camera_lerp < 0) g_camera_lerp = 0;
   if (g_camera_lerp > 100) g_camera_lerp = 100;
@@ -1285,13 +1302,23 @@ static void __cdecl on_camera_updated(void) {
     // the eye popped 22.9 -> 50.8 the instant an obstruction cleared. Preserving cur_h leaves both
     // to the client, which already handles them smoothly.
     if (cur_h > 0.01f && want_h > 0.01f) {
-      float k = cur_h / want_h;
+      // Ease onto the commanded angle rather than jumping to it. Rotating the eye is a POSITION
+      // change -- 10.8 deg at radius 47 is 8.8 units sideways -- so an instant correction of the
+      // accumulated follow lag reads as a whip on first touch.
+      float a0 = f_atan2(ex, ez);
+      float a1 = f_atan2(nx, nz);
+      float a;
 
-      eye->x = look->x + nx * k;
-      eye->z = look->z + nz * k;
-      // Height likewise stays the client's: it drops the eye when the camera is squeezed, and the
-      // same argument applies.
+      g_snap_ramp += 1.0f / (float)g_snap_frames;
+      if (g_snap_ramp > 1.0f) g_snap_ramp = 1.0f;
+      a = a0 + wrap_angle(a1 - a0) * g_snap_ramp;
+
+      // Distance and height stay exactly as the client left them.
+      eye->x = look->x + f_sin(a) * cur_h;
+      eye->z = look->z + f_cos(a) * cur_h;
     }
+  } else {
+    g_snap_ramp = 0.0f;                  // next engage eases in from wherever the camera has drifted
   }
 }
 
@@ -1386,11 +1413,11 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% snap=%d lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% dsmooth=%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
-            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth, g_snap_steering, g_camera_lerp,
+            g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_dist_smooth, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
             g_recentre_mask, g_suppress,
             g_xinput_get_state ? "ok" : "MISSING",
