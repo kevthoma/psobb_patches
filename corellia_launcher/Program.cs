@@ -665,9 +665,11 @@ namespace Corellia
             cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(14, 24), AutoSize = true };
             gPad.Controls.Add(cbController);
 
-            // Right-stick camera: classic PSO controls versus modern twin-stick ones. On by default,
-            // matching the plugin's own default -- unchecking writes RightStickCamera=0, which the
-            // plugin reads at startup and then leaves the client's camera completely untouched.
+            // Right-stick camera: classic PSO controls versus modern twin-stick ones. OFF by
+            // default, matching the plugin's own default -- the stick doing nothing is this
+            // client's existing behaviour, and a patch that reaches every install should not
+            // change anyone's controls until they ask. Ticking it writes RightStickCamera=1,
+            // which the plugin picks up live, with no patch update either way.
             cbRightStick = new CheckBox { Text = "Right-stick camera (modern controls)",
                                           Location = new Point(14, 52), AutoSize = true };
             gPad.Controls.Add(cbRightStick);
@@ -860,9 +862,9 @@ namespace Corellia
             cbController.Checked = AsBool(d, "ControllerPrompts", true);
             cbSaveLogin.Checked = ReadSaveLogin();
             cbRememberParty.Checked = AsBool(d, "RememberPartyInfo", false);
-            // Default TRUE, to match the plugin's compiled default. A mismatch here would silently
+            // ⚠ Default FALSE, to match the plugin's compiled default. A mismatch here would silently
             // flip the feature the first time anyone opened this window and pressed Save.
-            cbRightStick.Checked = AsBool(d, "RightStickCamera", true);
+            cbRightStick.Checked = AsBool(d, "RightStickCamera", false);
             // Default 0 = Enabled, matching the plugin's own default. A stale 2 from the old
             // three-mode list meant "Disabled", which is now 1 -- map it rather than silently
             // resetting someone's choice.

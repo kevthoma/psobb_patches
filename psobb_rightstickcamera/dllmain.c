@@ -245,7 +245,15 @@ int _fltused = 0;
 // ---------------------------------------------------------------------------
 // Configuration (widescreen.cfg, same file and parser style as the other plugins)
 // ---------------------------------------------------------------------------
-static int g_enabled     = 1;            // RightStickCamera
+// ⭐ OFF by default. The right stick doing nothing IS the existing behaviour of this client, and a
+// patch that reaches every install silently should not change how anyone's controls work until they
+// ask for it. Players opt in from the launcher's Controller Settings, or corellia-options.sh on the
+// Deck; both take effect live, with no patch update either way.
+//
+// ⚠ THREE places have to agree on this default -- here, the launcher's AsBool fallback, and the
+// Deck options script's camera_on(). A mismatch is silent and nasty: the UI would show one state
+// while the plugin was in the other, and the first Save would flip the feature for real.
+static int g_enabled     = 0;            // RightStickCamera
 static int g_sensitivity = 100;          // RightStickSensitivity, percent
 // 10% matches Ephinea's measured deadzone; 20 was our own guess and made small nudges useless.
 static int g_deadzone    = 10;           // RightStickDeadzone, percent of full scale
