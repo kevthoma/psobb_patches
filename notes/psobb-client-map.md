@@ -574,6 +574,193 @@ The absence of an `add esp,N` after the game's own calls is what identifies call
 Whether restoring a difficulty the character has not unlocked is re-clamped by the dialog. The level
 gate was never located. `RESTORE_DIFFICULTY` in the plugin exists to turn that half off.
 
+## Camera — MAPPED AND HOOKED (2026-09-07)
+
+The client has a complete third-person follow camera. Everything below was **navigated to** with the
+psobb.io decompilation and then **re-derived from our own `psobb.exe`** — see the provenance rule at
+the end of this file.
+
+### The state struct
+
+Global pointer **`0x00A48A54`** → `0x1D4` bytes (`allocate_in_main_arena(0x1d4)`).
+
+| Offset | Field |
+|---|---|
+| `+0x94`  | copy of `y_rotation`, written at the end of each update |
+| `+0x178` | `camera_source` — current eye |
+| `+0x184` | `camera_target` — current look-at |
+| `+0x190` / `+0x194` / `+0x198` | x / **y** / z rotation, PSO angle units (`0x10000` = 360°) |
+| `+0x19C` | FOV, passed to the projection setup |
+| `+0x1A0` | **`camera_desired_source`** |
+| `+0x1AC` | **`camera_desired_target`** |
+| `+0x1B8` | a lerp factor, but **not** the one that moves the eye — writing 1.0 changes nothing visible |
+| `+0x1BC` | ⭐ **the `camera_source` lerp**, stock value `0.2890` — see below |
+| `+0x1C0` / `+0x1C4` | shake frame counter / scaling |
+| `+0x1C8` | `desired_source_copy`, the "from" end of the collision ray |
+
+⚠ **`y_rotation` (+0x194) is an OUTPUT.** `apply_camera_angle_rotations` (`0x004D6448`) derives it
+from the source→target vector every frame. Writing it does nothing useful — it is a cached yaw that
+the rest of the engine *consumes*: every billboarded sprite (`matrix_rotation_y`) and the **minimap
+heading**, which is `0x8000 - y_rotation`.
+
+➡ That last one is a free on-screen oracle: **if the minimap needle turns, the real camera moved.**
+
+### 📏 Zoom levels — MEASURED, and Ephinea's are the same ladder shifted in (2026-09-08)
+
+Settled horizontal eye→target distance, character stationary, read from `+0x178`/`+0x184` at each of
+the five zoom levels. Ephinea's column is their `CameraZoom1..5` config defaults.
+
+| Zoom | Corellia (vanilla) | height | Ephinea | Δ | our step | their step |
+|---|---|---|---|---|---|---|
+| 1 | 30.0 | −1.7 | 25.00 | 5.00 | — | — |
+| 2 | 50.3 | 5.6 | 45.42 | 4.83 | 20.3 | 20.42 |
+| 3 | 58.5 | 10.5 | 53.60 | 4.86 | 8.2 | 8.18 |
+| 4 | 66.6 | 15.3 | 61.80 | 4.83 | 8.1 | 8.20 |
+| 5 | 75.0 | 20.2 | 70.00 | 4.97 | 8.4 | 8.20 |
+
+⭐ **The step sizes match to within noise.** Ephinea's zoom table is the vanilla table shifted a
+constant **~4.9 units closer**, not an independent set of numbers — so the levels DO correspond
+one-to-one and "their Zoom N" is comparable to "our Zoom N", just tighter. (An earlier working
+assumption that the level numbers were incomparable was wrong.)
+
+Height rises with distance (−1.7 → 20.2), so zoom is a pitch-preserving arc, not a pure dolly.
+
+⛔ **This rules zoom out as the cause of the post-release "rubber band"** — at Zoom 2 we sit at 50.3
+against their 45.4, and 4.9 units cannot produce a 12× difference in settling tail.
+
+⚠ Measuring this needs a **liveness check**. A first attempt returned 253 byte-identical samples
+because the client was backgrounded and not running its frame loop; frozen data analyses perfectly
+happily as "the value never changed". `camtrace.ps1` now counts distinct camera states and refuses
+to report success without motion.
+
+### ⭐ `+0x1BC` is the camera lag — and it is the whole "rubber band" (2026-09-08)
+
+📏 Six clean stick-releases, character stationary, open Forest room:
+
+| | while rotating | while idle |
+|---|---|---|
+| yaw error (actual − commanded) | **+25.8°** | 0.0° |
+| distance ratio (actual ÷ commanded) | **0.894** | 1.000 |
+
+The camera trails the commanded point by a constant angle *and* a constant fraction of distance while
+the stick is held, then unwinds on release. Fitting the post-release decay gives **k = 0.289/frame**
+over 24 fits, and a live probe reads `+0x1BC` = **0.2890** bit-exact. One first-order lag, both axes.
+
+⛔ Two explanations killed by that measurement — do not revisit:
+- **Not collision.** Nothing to collide with; character speed 0.00 across all 396 samples.
+- **Not zoom distance.** 50.3 vs Ephinea's 45.4 cannot yield a 12× settling difference.
+
+⚠ `+0x1B8` and `+0x1BC` look like a pair and the obvious guess is source/target. Only `+0x1BC` moves
+the eye: `+0x1B8` was held at our own `1.0` for a whole session with no effect on the trailing.
+
+⛔ **The lag is load-bearing — do not remove it globally.** It is what keeps the eye from tracking the
+chase camera's commanded point through scenery. Forcing `+0x1BC` to 1.0 on every frame, measured on a
+lobby lap with the right stick **never touched**: minimum camera distance 3.9 with 11 samples under
+15 units and one 30.4-unit jump in a single frame, against zero yanks at the stock value.
+
+⭐ And Ephinea is **not** a low-lag camera — they lag *more* than the stock client while running:
+
+| yaw lag (camera behind commanded angle) | Ephinea | stock client |
+|---|---|---|
+| stationary, working the stick | +0.8° | +25.8° |
+| running, stick untouched | +22.1° | +17.3° |
+
+➡ Almost no lag on **stick-driven** rotation, normal chase lag on **movement-driven** following. Any
+override has to be gated on whether the stick is actually deflected this frame.
+
+### ✅ The working recipe (2026-09-08)
+
+1. Write `camera_desired_source` (+0x1A0) at the held angle.
+2. **While the stick is deflected**, also rotate `camera_source` (+0x178) onto that angle,
+   **preserving the eye's current distance and height**, eased in over ~5 frames.
+3. Leave `+0x1BC` alone.
+
+Measured: **0.0° drift and 0 ms settle** on release (Ephinea 6.0° / 376 ms), and on a lobby lap with
+34% stick-on, **min distance 29.4 with zero collision yanks** — further from geometry than Ephinea.
+
+⛔ Overriding `+0x1BC` instead takes min distance to **1.3** with **6 yanks** and a 50.7-unit
+single-frame jump. It is the distance/collision smoothing, and it is load-bearing.
+
+### Per-frame update, and the one hook site
+
+`UpdateDefaultNPCCameraState` @ `0x004D3ABC` (`__fastcall`, state in `ecx`, kept in `esi`):
+
+```
+004D3B10  8B CD              mov ecx, ebp
+004D3B12  E8 DD E4 FF FF     call 0x004D1FF4   ; auto-camera writes desired_source/target
+004D3B17                     <-- hook point: points are fresh, nothing has read them yet
+          ...  0x004D3BA8 collision ray  ->  0x004D3C98 / 0x004D3D14 / 0x004D3E90 lerp or snap
+          ->  0x004D3D6C source-vs-geometry  ->  0x004D3DF4 shake  ->  0x0082EBC8 projection
+```
+
+`0x004D1FF4` writes `[0x00A48A54]+0x1A0..+0x1B4` directly — which is what pins both the global and the
+desired-point offsets, independent of the decompilation.
+
+**Therefore the way to drive this camera is to rotate `camera_desired_source` about
+`camera_desired_target` at `0x004D3B17`.** Smoothing, wall collision, `y_rotation`, the minimap,
+billboarding and camera-relative movement/lock-on are all *derived* from those two points and follow
+for free. Built as `psobb_rightstickcamera`.
+
+⛔ **Do not build a camera by rotating the view matrix in the d3d8 wrapper.** It is visual only:
+movement is camera-relative and lock-on is defined in terms of camera direction, so the game would
+still believe the camera never moved and the character would walk somewhere other than where the
+player is looking. This was the plan of record until the struct above was found; it is now a dead end.
+
+Y is the vertical axis: the degenerate case in the view-matrix path (`0x004D2158`) is "X and Z deltas
+are both zero", which it treats as looking straight up or down and nudges out of.
+
+### Input — ⛔ `g_joyState` IS NOT GAMEPLAY INPUT (2026-09-07)
+
+`g_joyState`, a whole `DIJOYSTATE2` (`0x110` bytes), is at **`0x00ADCC80`**, and `PollJoystickState`
+(`0x00842460`) does `GetDeviceState(0x110, buf)` on `g_pDevice[0]` (`0x00ADC9BC`) then `rep movsd`s
+it there. All true, and all useless for reading the controller during play.
+
+**It is the Pad Button Config screen's binding-capture buffer.** The only three references to
+`0x00ADCC80` in the whole binary — `0x842485`, `0x8424D2`, `0x8424EC` — are inside the two poll
+routines themselves, and each routine has exactly one caller, both in the config UI
+(`0x00790E16` → `PollJoystickStateWithFrameDelta`, `0x007915E1` → `PollJoystickState`). The
+frame-delta variant compares each axis against `4096.0f` @ `0x0098B350`, i.e. "which axis did you
+just move?" — binding capture, not input.
+
+So it is refreshed **only while that screen is open**, and then **freezes at its last value**.
+Measured in game: `Z=34205 Rz=18100` unchanged for three minutes while the camera span from the
+stale reading. A frozen axis is indistinguishable from a held stick, so this can never be a safe
+input source.
+
+⚠ **This is where the psobb.io `input.h` is wrong**: it claims `g_joyState` is "read by code outside
+this subsystem (menu / camera / heading update paths)". Our binary says nothing outside the poll
+routines touches it. The write was verified and the *readers* were taken on trust — exactly the
+mistake the provenance rule exists to prevent.
+
+➡ **Read the pad with XInput instead.** The client holds its DirectInput device
+`DISCL_EXCLUSIVE | DISCL_BACKGROUND` (which is why other gamepad apps lose it while PSO runs), so it
+cannot be shared — but XInput is a separate API and is unaffected. Our builds ship Xidi, whose whole
+purpose is presenting an XInput pad to this DirectInput game, so the physical controller is an XInput
+device by construction. Load `XInputGetState` dynamically (`xinput1_4` → `1_3` → `9_1_0`); a static
+import refuses to start the client on a machine without that exact DLL.
+
+⚠ And note the axis convention differs between the two APIs. DirectInput here delivers **unsigned
+`0..65535` centred at ~32768** (PSOBB never calls `SetProperty(DIPROP_RANGE)`, so axes arrive in the
+default range) — reading those as signed makes a centred stick look pegged. XInput thumbsticks are
+**signed `SHORT`, centred at 0, Y positive-up**.
+
+### Still unverified
+
+Two things that reading the binary cannot settle, both left configurable rather than compiled in:
+
+1. **Which `g_GenericMenuSubSelection` (`0x00A489FC`) bits mean "leave the camera alone."** Settled
+   partly: `0x82C` was wrong. `0x0C` only selects the branch inside `0x004D1FF4` that writes the
+   *current* points as well as the desired ones — it does not mean hands-off, and bit `0x4` is set
+   during ordinary play (live masks `0x604`, `0x204`, `0x600`), so `0x82C` disabled the feature most
+   of the time. Now `0x820`, the mask the update itself tests. Whether cutscenes need more bits is
+   still untested.
+2. **Which way is up.** XInput's Y is positive-up and a positive pitch here raises the eye, so the
+   plugin negates it to get the un-inverted convention. Not yet confirmed by feel.
+
+Where the right stick lives is **settled**: the client's own Pad Button Config shows
+`Right Analog Left/Right = PAD Z Axis` and `Right Analog Forward/Backward = PAD Z Rotate`, matching
+the axes observed moving. Base PSO has the bindings; it just never drives a camera with them.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,
@@ -594,7 +781,14 @@ identified `SetRenderTarget+0x68` reading `[NULL+8]` precisely.
 **Using the wrapper as an oracle.** We compile the d3d8 wrapper, and every `SetTransform` the game issues
 passes through our code — including the view and projection matrices. For anything camera-related this
 turns a blind memory scan into a targeted one: compute the true camera yaw from the view matrix each
-frame, then look for the address whose value tracks it. Not yet built.
+frame, then look for the address whose value tracks it. Never built, and **not needed for the camera** —
+the struct was found by reading instead (see "Camera" above). Still the right technique for the next
+continuously-changing value that has no name.
+
+**Re-check an old plan against assets acquired after it was written.** The right-stick camera sat on the
+board for weeks as "highest risk, may stall", with a bounded memory-scan spike defined to decide whether
+to abandon it. The plan predated the psobb.io decompilation. Reading that instead answered the whole
+question in one session, and the spike was never run.
 
 **Anchoring on a known wire format.** For the create-game dialog, the C1 packet's `0x50`-byte layout is
 known exactly, so the code that *builds* C1 is findable, and the struct holding the dialog's live
@@ -605,7 +799,6 @@ selections is upstream of it. Better than searching for the UI directly.
 | Goal | Anchor | Notes |
 |---|---|---|
 | Remembered game-creation settings | **DONE — mode + difficulty, confirmed in game 2026-09-07** (`psobb_gamesettings`). See the create-game dialog section for the four patch sites and the three-display-paths trap. Party Name / Password are mapped but not built. | Persist per install directory rather than per registry leaf — each instance is its own install, so a file beside the client is correctly scoped without having to detect which leaf this build owns. |
-| Right-stick camera | View matrix via our `SetTransform` | Easier to *find* than the above (a continuously-changing value can be correlated) but far more work after: the auto-camera overwrites each frame, plus collision and lock-on. |
 | Inventory past 30 | `PlayerInventory` at offset 0 | Protocol side understood; the client-side wall is the 30-slot inventory UI, which has no paging. |
 | In-game volume control | `dsound.dll` proxy (single import: ordinal #1 `DirectSoundCreate`) | No game RE needed — wrap `CreateSoundBuffer` and scale per buffer. Verify the streaming-vs-static split before promising separate BGM/SE. See the sound survey above. |
 | Post-quest exit in One Person | — | **No anchor yet.** Confirmed the client sends `0x98` Leave game ~2s after the quest's success handler `ret`s; the trigger is in the client and unlocated. Quest scripts and server are ruled out. |

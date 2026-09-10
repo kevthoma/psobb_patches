@@ -196,3 +196,78 @@ jobs:
             psobb_gamesettings/bin/gamesettings.pdb
             psobb_gamesettings/bin_diag/gamesettings.asi
           if-no-files-found: error
+
+  rightstickcamera:
+    # ASI plugin: right-stick camera control. It retargets ONE call inside the client's per-frame
+    # camera update and rotates the eye point the auto-camera just chose. Guarded at runtime by the
+    # exact bytes it expects, so what CI protects is that it still compiles -- nothing else builds
+    # the ASI plugins at all. 32-bit, same as the client.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      # The diagnostic build is not optional polish here: two facts about this plugin cannot be
+      # determined statically -- which DIJOYSTATE2 axes Xidi puts the right stick on, and which
+      # g_GenericMenuSubSelection bits mean "leave the camera alone". The diagnostic build logs
+      # both, and is how the first in-game session settles them. Separate OutDir/IntDir so it
+      # cannot share object files with the release build and quietly become it.
+      - name: Build psobb_rightstickcamera (diagnostic)
+        run: >
+          msbuild psobb_rightstickcamera\msvc\psobb_rightstickcamera.vcxproj
+          /p:Configuration=Release
+          /p:Platform=Win32
+          /p:PlatformToolset=v143
+          /p:WindowsTargetPlatformVersion=10.0
+          /p:OutDir=..\bin_diag\
+          /p:IntDir=..\obj_diag\
+          /p:ExtraDefines=RSC_DIAGNOSTIC=1
+          /m /v:minimal
+
+      - name: Build psobb_rightstickcamera (Release|Win32)
+        # Same toolset pin as the other jobs: the runner's VS is newer than the version the
+        # vcxproj selects for, so name v143 rather than falling back to an absent v141.
+        run: >
+          msbuild psobb_rightstickcamera\msvc\psobb_rightstickcamera.vcxproj
+          /p:Configuration=Release
+          /p:Platform=Win32
+          /p:PlatformToolset=v143
+          /p:WindowsTargetPlatformVersion=10.0
+          /m /v:minimal
+
+      # Same trap the gamesettings job documents: /p:AdditionalOptions is a global PROPERTY while
+      # PreprocessorDefinitions is item METADATA, so it is entirely possible to publish a
+      # "diagnostic" build that is byte-identical in behaviour to the release one. Check the marker
+      # rather than mere existence.
+      - name: Verify the diagnostic build is actually diagnostic
+        shell: pwsh
+        run: |
+          $rel  = 'psobb_rightstickcamera\bin\rightstickcamera.asi'
+          $diag = 'psobb_rightstickcamera\bin_diag\rightstickcamera.asi'
+          foreach ($p in @($rel, $diag)) {
+            if (-not (Test-Path $p)) { throw "missing expected artifact: $p" }
+          }
+          function Has-Marker($p) {
+            $b = [IO.File]::ReadAllBytes($p)
+            $t = [Text.Encoding]::ASCII.GetString($b)
+            return $t.Contains('DIAGNOSTIC BUILD') -and $t.Contains('menuflags=')
+          }
+          if (-not (Has-Marker $diag)) { throw 'bin_diag lacks the diagnostic strings - the define did not reach cl' }
+          if (Has-Marker $rel)        { throw 'bin release contains diagnostic strings - wrong build published' }
+          "release    {0,8} bytes" -f (Get-Item $rel).Length
+          "diagnostic {0,8} bytes" -f (Get-Item $diag).Length
+
+      - name: Show build output
+        run: dir psobb_rightstickcamera\bin
+
+      - name: Upload rightstickcamera.asi (release + diagnostic, + symbols)
+        uses: actions/upload-artifact@v7
+        with:
+          name: rightstickcamera-Release-Win32
+          path: |
+            psobb_rightstickcamera/bin/rightstickcamera.asi
+            psobb_rightstickcamera/bin/rightstickcamera.pdb
+            psobb_rightstickcamera/bin_diag/rightstickcamera.asi
+          if-no-files-found: error

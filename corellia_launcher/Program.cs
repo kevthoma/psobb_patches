@@ -395,14 +395,21 @@ namespace Corellia
         readonly string dir;
         readonly string cfgPath;
 
-        ComboBox cboMode, cboRes, cboSceneSharpen, cboFont;
+        ComboBox cboMode, cboRes, cboSceneSharpen, cboFont, cboChaseCam;
 
         // Which modes the dropdown currently OFFERS, as indices into DisplayModes/DisplayModeKeys.
         // The dropdown position is no longer the mode index, because Fullscreen is not offered --
         // see BuildModeList. Never index DisplayModeKeys with cboMode.SelectedIndex directly.
         readonly List<int> offeredModes = new List<int>();
+
+        // Chase Cam positions, in the order they appear in the dropdown; the index is the ChaseCam
+        // value the plugin reads. A spectrum from "the game drives" to "you drive".
+        static readonly string[] ChaseCamNames = {
+            "Enabled - eases back behind you as you move",
+            "Disabled - stays where you put it",
+        };
         CheckBox cbSMAA, cbSSAO, cbCel, cbDOF, cbHDR, cbMSAA, cbSceneSharpen, cbController, cbSaveLogin,
-                 cbRememberParty;
+                 cbRememberParty, cbRightStick;
         CheckBox cbSkipLauncher; // Proton only -- see the RunningUnderWine block
         Label lblSkipHint;
         bool soundHidden;        // running under Proton: the sliders drive a proxy that is not there
@@ -589,7 +596,7 @@ namespace Corellia
             StartPosition = FormStartPosition.CenterScreen;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(430, 628);
+            ClientSize = new Size(430, 732);
             Font = new Font("Segoe UI", 9f);
 
             var title = new Label {
@@ -649,14 +656,36 @@ namespace Corellia
             tbEffects = AddVolumeSlider(gSound, "Effects:", 88);
             Controls.Add(gSound);
 
+            // Controller settings. Both entries are about how the pad behaves, so they belong together
+            // rather than loose among the login and party options.
+            var gPad = new GroupBox { Text = "Controller Settings", Location = new Point(16, 490), Size = new Size(398, 118) };
+
             // Controller button prompts (HD UI Controller Edition): swaps f256_hyouji.prs so on-screen
             // button hints suit a gamepad (e.g. Palette Swap shows "R" instead of "Ctrl").
-            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(24, 490), AutoSize = true };
-            Controls.Add(cbController);
+            cbController = new CheckBox { Text = "Controller button prompts", Location = new Point(14, 24), AutoSize = true };
+            gPad.Controls.Add(cbController);
+
+            // Right-stick camera: classic PSO controls versus modern twin-stick ones. On by default,
+            // matching the plugin's own default -- unchecking writes RightStickCamera=0, which the
+            // plugin reads at startup and then leaves the client's camera completely untouched.
+            cbRightStick = new CheckBox { Text = "Right-stick camera (modern controls)",
+                                          Location = new Point(14, 52), AutoSize = true };
+            gPad.Controls.Add(cbRightStick);
+
+            // How the chase camera and the player share the camera. Only meaningful when the
+            // right-stick camera is on, so it follows it and greys out with it.
+            var lblChase = new Label { Text = "Chase cam:", Location = new Point(14, 84), AutoSize = true };
+            cboChaseCam = new ComboBox { Location = new Point(96, 80), Size = new Size(280, 24),
+                                         DropDownStyle = ComboBoxStyle.DropDownList };
+            cboChaseCam.Items.AddRange(ChaseCamNames);
+            gPad.Controls.Add(lblChase);
+            gPad.Controls.Add(cboChaseCam);
+            cbRightStick.CheckedChanged += (s2, e2) => { cboChaseCam.Enabled = cbRightStick.Checked; };
+            Controls.Add(gPad);
 
             // Remember login — toggles the game's own ACCOUNT_CHECK / PASSWORD_CHECK registry flags
             // (like the native option). We never read or write the credentials themselves.
-            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 514), AutoSize = true };
+            cbSaveLogin = new CheckBox { Text = "Save ID and Password", Location = new Point(24, 618), AutoSize = true };
             Controls.Add(cbSaveLogin);
 
             // Remember the create-game settings: play mode, difficulty, party name and password.
@@ -664,7 +693,7 @@ namespace Corellia
             // The password is the part that earns an opt-in -- a secret at rest, and a restore that
             // goes wrong changes who can join -- but one switch is what was chosen for consistency.
             cbRememberParty = new CheckBox { Text = "Remember party settings",
-                                             Location = new Point(24, 538), AutoSize = true };
+                                             Location = new Point(24, 642), AutoSize = true };
             Controls.Add(cbRememberParty);
 
             // On the Deck the sound sliders drive a proxy that is not there, so hide them rather
@@ -674,7 +703,10 @@ namespace Corellia
             {
                 int shift = gSound.Height + (gSound.Top - (gSharp.Top + gSharp.Height));
                 gSound.Visible = false;
-                foreach (var c in new Control[] { cbController, cbSaveLogin, cbRememberParty })
+                // ⚠ gPad, not cbController: the controller prompts checkbox now lives INSIDE the
+                // Controller Settings group, so its Location is relative to that group. Shifting
+                // the child would move it within the box and leave the box itself behind.
+                foreach (var c in new Control[] { gPad, cbSaveLogin, cbRememberParty })
                     c.Location = new Point(c.Location.X, c.Location.Y - shift);
                 ClientSize = new Size(ClientSize.Width, ClientSize.Height - shift);
                 soundHidden = true;
@@ -700,7 +732,7 @@ namespace Corellia
                 ClientSize = new Size(ClientSize.Width, ClientSize.Height + extraRows);
             }
 
-            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 568), Size = new Size(130, 44) };
+            var btnSave = new Button { Text = "Save && Close", Location = new Point(150, 672), Size = new Size(130, 44) };
             if (soundHidden)
                 btnSave.Location = new Point(btnSave.Location.X, btnSave.Location.Y - soundShift + extraRows);
             btnSave.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
@@ -828,6 +860,17 @@ namespace Corellia
             cbController.Checked = AsBool(d, "ControllerPrompts", true);
             cbSaveLogin.Checked = ReadSaveLogin();
             cbRememberParty.Checked = AsBool(d, "RememberPartyInfo", false);
+            // Default TRUE, to match the plugin's compiled default. A mismatch here would silently
+            // flip the feature the first time anyone opened this window and pressed Save.
+            cbRightStick.Checked = AsBool(d, "RightStickCamera", true);
+            // Default 0 = Enabled, matching the plugin's own default. A stale 2 from the old
+            // three-mode list meant "Disabled", which is now 1 -- map it rather than silently
+            // resetting someone's choice.
+            int chase = ParseInt(d, "ChaseCam", 0);
+            if (chase == 2) chase = 1;
+            if (chase < 0 || chase >= ChaseCamNames.Length) chase = 0;
+            cboChaseCam.SelectedIndex = chase;
+            cboChaseCam.Enabled = cbRightStick.Checked;
             if (cbSkipLauncher != null)
                 cbSkipLauncher.Checked = AsBool(d, "SkipLauncher", false);
 
@@ -906,6 +949,8 @@ namespace Corellia
             SetKey(lines, "SceneSharpenStrength", (string)cboSceneSharpen.SelectedItem ?? "0.25");
             SetKey(lines, "ControllerPrompts", cbController.Checked ? "1" : "0");
             SetKey(lines, "RememberPartyInfo", cbRememberParty.Checked ? "1" : "0");
+            SetKey(lines, "RightStickCamera", cbRightStick.Checked ? "1" : "0");
+            SetKey(lines, "ChaseCam", Math.Max(0, cboChaseCam.SelectedIndex).ToString());
             // Only written where the checkbox exists. On Windows the key is left exactly as found,
             // so an install directory shared with a Deck cannot have its choice silently cleared.
             if (cbSkipLauncher != null)
