@@ -739,6 +739,16 @@ purpose is presenting an XInput pad to this DirectInput game, so the physical co
 device by construction. Load `XInputGetState` dynamically (`xinput1_4` → `1_3` → `9_1_0`); a static
 import refuses to start the client on a machine without that exact DLL.
 
+⛔ **That "by construction" claim is too strong, and a PS5 pad appears to break it (2026-09-10).**
+Xidi presents an XInput pad **to the game's DirectInput** -- it does not make the physical controller an
+XInput device for OUR reads. A DualSense in native mode is not an XInput device, so `XInputGetState`
+would never see it and the camera would never engage. Reported from play, not yet reproduced (no
+hardware on hand). Steam Input or DS4Windows would mask it by presenting the pad as an Xbox 360
+controller, which may be why it works for some players and not others.
+
+⚠ A DirectInput fallback cannot reuse `g_joyState` -- see below, it is the Pad Config capture buffer
+and freezes when that screen closes. It would need its own device enumeration.
+
 ⚠ And note the axis convention differs between the two APIs. DirectInput here delivers **unsigned
 `0..65535` centred at ~32768** (PSOBB never calls `SetProperty(DIPROP_RANGE)`, so axes arrive in the
 default range) — reading those as signed makes a centred stick look pegged. XInput thumbsticks are

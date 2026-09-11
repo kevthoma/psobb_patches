@@ -60,28 +60,55 @@ Adds right-stick camera control. Base PSO has no free camera — the right stick
 
 It does **not** rotate the view matrix. The client already has a full third-person follow camera with its own smoothing and map-geometry collision; this plugin hooks one call inside that camera's per-frame update and rotates the eye point the auto-camera just chose, about the point it is looking at. Everything downstream is derived from those two points, so the wall collision, the smoothing, the minimap heading, sprite billboarding, and camera-relative movement and lock-on all follow with no extra work.
 
-The rotation is an *offset* on top of the auto-camera, which keeps full control of distance and height. It re-centres itself in cutscenes and wherever the client snaps the camera on its own.
+It holds an **absolute world angle**, not an offset. The chase camera re-aims itself as you move, so an additive offset swings the view on its own -- harmful in combat. While the stick is deflected the plugin also rotates the eye directly onto that angle, **preserving whatever distance and height the client has chosen**, which is what makes it stop dead when you let go instead of rubber-banding. Distance, height and wall collision stay entirely the client's business.
 
 Settings live in `widescreen.cfg`:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ChaseCam` | `1` | How the chase camera and the player share the camera: `0` Enabled, `1` Hybrid, `2` Disabled. Sets the defaults for the three keys below it. |
-| `RightStickCamera` | `1` | Master on/off — modern camera versus classic PSO. Exposed in the launcher's Options window as **Right-stick camera (modern controls)**, and applied live: see below. |
+| `RightStickCamera` | `0` | Master on/off. **Off by default** -- the right stick doing nothing is this client's existing behaviour, so players opt in. Exposed in the launcher as **Right-stick camera (modern controls)** and in `corellia-options.sh` on the Deck. Applied live. |
+| `ChaseCam` | `0` | `0` Enabled -- eases back behind you as you move (25 deg/s, measured off Ephinea at 26). `1` Disabled -- holds the angle you give it. A stale `2` from the old three-mode list is migrated to Disabled. |
 | `RightStickSensitivity` | `100` | Percent, scaling both turn speeds. |
 | `RightStickSpeedSlow` / `RightStickSpeedFast` | `78` / `162` | Degrees/second below and above the split. |
 | `RightStickSpeedSplit` | `50` | Percent deflection at which the speed steps up. |
 | `RightStickDeadzone` | `10` | Percent of full stick travel ignored around centre. |
 | `RightStickInvertX` / `RightStickInvertY` | `0` | Invert each axis. |
-| `RightStickPitch` | `0` | Vertical look. Off by default — see below. |
-| `RightStickFreezeChase` | `1` | Hold the eye **distance and height** while you are steering, turning it into a plain orbit camera. |
-| `RightStickReturnSpeed` | `25` | Degrees/second the camera drifts back behind you **while moving**. `0` holds the angle indefinitely. |
-| `RightStickFollowNear` / `RightStickFollowFar` | `60` / `180` | The follow band, as a percentage of the chase camera's distance. Inside it the camera does not move at all. Both `100` restores rigid tracking. |
+| `RightStickPitch` | `0` | Vertical look. Off by default -- see below. |
+| `RightStickSnapWhileSteering` | `1` | Rotate `camera_source` directly while the stick is deflected, preserving the client's distance and height. This is what removes the lag; `0` falls back to commanding the desired point only, which trails ~25 deg behind the stick. |
+| `RightStickSnapFrames` | `5` | Frames to ease onto the commanded angle when steering starts. Rotating the eye moves it sideways, so correcting the accumulated follow lag in one frame reads as a whip. |
+| `RightStickRequireAttachedCamera` | `1` | Do not drive the camera when there is no character to follow -- the hook runs in **every** scene, so without this the stick swings the title screen, character select, ship select and the loading screen. |
+| `RightStickAttachedFrames` | `10` | Frames the camera must have nothing attached before we believe it. Debounced so a transient null during a warp cannot drop the held angle mid-play. |
+| `RightStickCameraLerp` | `0` | Override the client's own camera lerp (`+0x1BC`), percent per frame. **Leave at 0.** It is the distance/collision smoothing, not the angular lag; forcing it drives the eye into scenery. |
+| `RightStickFollowNear` / `RightStickFollowFar` | `100` / `100` | Follow band, as a percentage of the chase camera's distance. Both `100` (the default, and the only configuration that has been measured) means the camera tracks rigidly at the client's own distance. |
+| `RightStickFreezeChase` | `0` | Hold the eye distance and height while steering. Off -- the client owning distance is what fixed the framing jumping about between runs. |
+| `RightStickReturnSpeed` | `25` | Degrees/second the camera drifts back behind you **while moving**. Set from `ChaseCam`; `0` holds the angle indefinitely. |
 | `RightStickYawLimit` | `180` | Degrees the camera may sit from behind you. `180` (default) = no limit. |
-| `RightStickAlwaysEngaged` | `0` | Take the camera immediately instead of on first stick touch. |
+| `RightStickAlwaysEngaged` | `0` | Take the camera immediately instead of on first stick touch. Set from `ChaseCam`. |
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
+
+### ⛔ Known issue: PS5 (DualSense) controllers
+
+**Reported from play 2026-09-10; not yet reproduced, no DualSense on hand.** The right stick does not
+drive the camera correctly on a PS5 pad. The exact failure is not characterised yet -- "not handling it
+properly" could be no response at all, wrong axes, or a stuck axis.
+
+Leading hypothesis: **the plugin reads XInput directly**, and a DualSense in its native mode is not an
+XInput device. `XInputGetState` would simply never see it, so the camera would never engage. Xidi ships
+with our builds and presents an XInput pad *to the game's DirectInput*, which is why the client itself
+works with such a pad -- but that does not make the physical controller an XInput device for our own
+reads. Steam Input or DS4Windows would mask this by presenting the pad as an Xbox 360 controller, so
+whether it works may depend on how the player launched the game.
+
+⚠ The obvious fallback is barred: `g_joyState` is the Pad Config screen's binding-capture buffer, not
+gameplay input, and it freezes at its last value when that screen closes. A DirectInput path would need
+its own device enumeration.
+
+**To diagnose, no hardware needed on our side:** a DualSense player runs the diagnostic build and sends
+`corellia_rightstickcamera.log`. The startup line reports whether `XInputGetState` resolved, and each
+sampled line carries `slot=`, `conn=` and the raw `rx=`/`ry=` values. `conn=0` confirms the hypothesis
+outright; live `rx`/`ry` that move the camera wrongly points somewhere else entirely.
 
 **Vertical look is off by default.** It works and is clamped, but stacked on the chase camera's own
 pitch the two end up solving for height at the same time and it reads oddly in play. Set
