@@ -113,10 +113,14 @@
 // that were CONSTANT within a state but DIFFERENT across them.
 //
 // ⚠ Why not the obvious alternatives: `g_GenericMenuSubSelection` does not separate the two -- the
-// title screen reads 0x604 and character select 0x204, and both of those also occur during ordinary
-// play (see DEFAULT_SUPPRESS below; suppressing on bit 0x4 is what disabled the whole feature in the
-// first build). The heap pointer itself is not stable across runs. And "look-at is at the origin"
+// title screen reads 0x604 and character select 0x204 -- but 0x604 is also a focused NPC conversation
+// and 0x204 a loading screen (re-attributed 2026-09-13; see DEFAULT_SUPPRESS), so the flags describe
+// "the client owns the camera", not "we are in a menu". The heap pointer itself is not stable across runs. And "look-at is at the origin"
 // looks tempting but is wrong: the lobby sits at x = 0.0 exactly.
+// ⭐ The client's LOOK-AT lerp. 0.67 in ordinary play; the client sets it to exactly 0 when it takes the
+// camera for itself -- a focused NPC conversation, where it locks a close-up. Our cue to hands off.
+// (Same field an early build wrote 1.0 into as OFF_LERP_A; nothing of ours writes it any more.)
+#define OFF_LOOK_LERP       0x1B8
 #define OFF_ATTACH          0x090        // object pointer; NULL whenever there is no character
 // (+0x084 and +0x1C4 are two more object pointers. They are null on the MENU camera but still live
 // on ship select and the loading screen, so they do not separate those -- see below.)
@@ -187,8 +191,13 @@
 //
 // ⚠ This was 0x82C in the first build, which also suppressed on 0x0C. That was wrong. 0x0C merely
 // selects the branch inside 0x004D1FF4 that writes the CURRENT points as well as the desired ones;
-// it does not mean the camera is off limits. Measured in game 2026-09-07, bit 0x4 is set during
-// ordinary play (live masks: 0x604, 0x204, 0x600), so 0x82C disabled the feature most of the time.
+// it does not mean the camera is off limits. Measured in game 2026-09-07, bit 0x4 was seen alongside
+// play (live masks: 0x604, 0x204, 0x600), so 0x82C disabled the feature most of the time.
+//
+// ⚠ Re-attributed 2026-09-13 by a 150s trace with the states labelled: pure play read 0x600 throughout,
+// 0x604 appeared ONLY during a focused NPC conversation and 0x204 ONLY on loading screens. The 09-07
+// sample very likely spanned those states. The conversation is handled by the look-at-lerp test
+// (OFF_LOOK_LERP), a single-purpose signal, rather than by re-adding bit 0x4 here.
 // Still a config key: if cutscenes turn out to need protecting, bits go back without a rebuild.
 #define DEFAULT_SUPPRESS    0x820
 
@@ -274,6 +283,8 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 // Off switch for the not-in-a-game guard above, in case a map ever turns up where the attachment
 // slot is empty during real play.
 static int g_attach_guard = 1;           // RightStickRequireAttachedCamera
+// Off switch for the focused-camera yield below, in case some state zeroes the look-at lerp during play.
+static int g_focus_guard = 1;            // RightStickYieldToFocusCamera
 #define DEFAULT_ATTACH_FRAMES 10         // ~0.3s before we believe the camera has nothing to follow
 static int g_attach_frames = DEFAULT_ATTACH_FRAMES;  // RightStickAttachedFrames
 static int g_detached = 0;               // consecutive frames with no attached object
@@ -598,6 +609,7 @@ static void load_config(void) {
   g_allow_pitch = cfg_int(buf, got, "RightStickPitch", g_allow_pitch) ? 1 : 0;
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
   g_attach_guard = cfg_int(buf, got, "RightStickRequireAttachedCamera", g_attach_guard) ? 1 : 0;
+  g_focus_guard  = cfg_int(buf, got, "RightStickYieldToFocusCamera", g_focus_guard) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -1126,8 +1138,30 @@ static void __cdecl on_camera_updated(void) {
     }
     if (g_detached >= g_attach_frames) {
       release_camera();
+      // ⚠ Forget the held angle too. Every trip through a loading screen lands in a fresh spawn, so the
+      // previous area's world yaw is meaningless there. Without this, the re-engage after loading
+      // RESUMES it unless the warp detector happens to fire on the first attached frame -- which
+      // depends on the spawn's look-at being >100 units from the loading camera's, not a guarantee.
+      // Hits never null this pointer, so resuming the angle through a hit is unaffected.
+      g_yaw_seeded = 0;
       return;
     }
+  }
+
+  // ⭐ The client has taken the camera for itself -- a focused NPC conversation. Yield.
+  //
+  // 📏 Found by snapshotting the whole camera struct across play / conversation / play and keeping
+  // only fields constant within a state but different across them. Exactly ONE field qualified:
+  //
+  //     +0x1B8 (look-at lerp)   play 0.67   conversation 0.00   play again 0.67
+  //
+  // Before this the stick spun the conversation close-up through a full circle, and whenever it
+  // rested the client snapped its own fixed angle back (134.9 deg in the trace) -- the two of us
+  // fighting every frame. Released, not suspended: g_yaw_seeded survives, so the angle the player
+  // held before the conversation comes back when it ends.
+  if (g_focus_guard && *(float*)(cam + OFF_LOOK_LERP) == 0.0f) {
+    release_camera();
+    return;
   }
 
   // Cutscenes, teleports and menu states where the client snaps or freezes the camera. Hand
