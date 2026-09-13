@@ -121,6 +121,23 @@
 // camera for itself -- a focused NPC conversation, where it locks a close-up. Our cue to hands off.
 // (Same field an early build wrote 1.0 into as OFF_LERP_A; nothing of ours writes it any more.)
 #define OFF_LOOK_LERP       0x1B8
+
+// ⭐ The ACTIVE CAMERA CONTROLLER, and its mode bits -- the client's own snap-versus-lerp switch.
+//
+// Verified in OUR binary, UpdateDefaultNPCCameraState @ 0x004D3ABC:
+//     004D3AC0  movzx eax, byte [0x00A489F4]          ; controller index
+//     004D3AC7  mov   ebp, [eax*4 + 0x00A48A00]       ; active controller
+//     004D3B2C  mov   eax, [ebp+0x38] / test al,1     ; collision ray
+//     004D3B3E  test al,4 -> 0x004D3D14 (lerp)  /  test al,8 -> 0x004D3C98 (source + lerp)
+//               neither  -> 0x004D3E90 = copy desired points to current points: a SNAP
+// ⚠ The decompilation names the index _00a489f5. Our build reads 0x00A489F4 -- verify, never trust.
+//
+// Live in ordinary play the mode is 0x5 (collision + lerp). A scripted camera -- the focus camera a
+// quest takes on entry, and the NPC-conversation close-up -- runs with neither 0x4 nor 0x8 set.
+#define ADDR_CAM_CTRL_INDEX 0x00A489F4   // byte
+#define ADDR_CAM_CTRL_ARRAY 0x00A48A00   // controller* [4]
+#define OFF_CTRL_MODE       0x38
+#define CTRL_MODE_SMOOTHED  0x0C         // either lerp bit set = the client is smoothing = ordinary play
 #define OFF_ATTACH          0x090        // object pointer; NULL whenever there is no character
 // (+0x084 and +0x1C4 are two more object pointers. They are null on the MENU camera but still live
 // on ship select and the loading screen, so they do not separate those -- see below.)
@@ -1162,6 +1179,30 @@ static void __cdecl on_camera_updated(void) {
   if (g_focus_guard && *(float*)(cam + OFF_LOOK_LERP) == 0.0f) {
     release_camera();
     return;
+  }
+
+  // ⭐ Any camera the client SNAPS rather than smooths is one it is directing itself. Yield.
+  //
+  // 📏 The look-at-lerp test above caught NPC conversations but not the focus camera a quest takes on
+  // entry: that one ran with flags 0x600 and look-at lerp 0.67, identical to play on both signals, and
+  // no field inside camera_state_struct separated it. The mode lives in the CONTROLLER instead.
+  //
+  // Evidence the switch is the right one, from a labelled capture: in both the quest camera and the
+  // conversation, the current points equalled the desired points BIT-EXACTLY in 100% of samples, and
+  // neither state had the 0x820 flag bits -- so the snap came from this mode test, not the flags.
+  // Ordinary play: 0% bit-exact, including every sample where we were steering, so our own writes
+  // cannot trip it. Released, not suspended: g_yaw_seeded survives and the held angle resumes after.
+  if (g_focus_guard) {
+    BYTE idx = *(BYTE*)ADDR_CAM_CTRL_INDEX;
+
+    if (idx < 4) {
+      DWORD ctl = *(DWORD*)(ADDR_CAM_CTRL_ARRAY + (DWORD)idx * 4);
+
+      if (ctl && ((*(DWORD*)(ctl + OFF_CTRL_MODE)) & CTRL_MODE_SMOOTHED) == 0) {
+        release_camera();
+        return;
+      }
+    }
   }
 
   // Cutscenes, teleports and menu states where the client snaps or freezes the camera. Hand

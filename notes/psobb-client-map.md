@@ -681,6 +681,26 @@ Measured: **0.0° drift and 0 ms settle** on release (Ephinea 6.0° / 376 ms), a
 ⛔ Overriding `+0x1BC` instead takes min distance to **1.3** with **6 yanks** and a 50.7-unit
 single-frame jump. It is the distance/collision smoothing, and it is load-bearing.
 
+### ⭐ The camera CONTROLLER and its snap-vs-lerp mode (2026-09-13, verified in our binary)
+
+`camera_state_struct` holds the points; the **controller** decides how they move. Several exist; one is active:
+
+| address / offset | meaning |
+|---|---|
+| `byte [0x00A489F4]` | active controller index. ⚠ The decompilation names it `_00a489f5` — **our build reads `0x00A489F4`** (`004D3AC0 movzx eax, byte [0x00A489F4]`). |
+| `[0x00A48A00 + idx*4]` | active controller pointer (array of 4 seen live) |
+| controller `+0x00` | vtable — Ghidra's `->x` label for the mode is misleading |
+| controller `+0x1C` | followed player (same pointer as `camera_state+0x090`) |
+| controller `+0x38` | **mode bits**: `0x1` collision ray, `0x4` → `0x004D3D14` lerp, `0x8` → `0x004D3C98` source+lerp, **neither → `0x004D3E90` SNAP** (copy desired → current) |
+
+Live in ordinary play the mode is `0x5`. **A snap is the client directing the camera itself**: the focus
+camera a quest takes on entry (`cam_pan` pins it to a world point from the quest registers) and the NPC
+conversation close-up both ran with the current points bit-identical to the desired points in 100% of
+samples, without the `0x820` flag bits — so via the mode, not the flags. Ordinary play: 0%, even while
+the plugin steers. The quest opcodes write the controller, not the camera state: `cam_adj` →
+`EnableDefaultNPCCamera`, `cam_zmin`/`cam_zmout` set/clear controller `+0x100`, `cam_pan_V3` →
+`ConstructNPCCameraState`. That is why no field inside `camera_state_struct` separated the quest camera.
+
 ### Per-frame update, and the one hook site
 
 `UpdateDefaultNPCCameraState` @ `0x004D3ABC` (`__fastcall`, state in `ecx`, kept in `esi`):
