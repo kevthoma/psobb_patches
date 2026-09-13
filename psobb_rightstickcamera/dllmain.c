@@ -302,6 +302,11 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 static int g_attach_guard = 1;           // RightStickRequireAttachedCamera
 // Off switch for the focused-camera yield below, in case some state zeroes the look-at lerp during play.
 static int g_focus_guard = 1;            // RightStickYieldToFocusCamera
+// ⭐ Hold the camera's distance steady while steering AND moving. See the note at the distance block.
+#define STEER_HOLD_MOVE     0.5f         // look-at units/frame counted as moving; running measures ~1.5
+static int   g_steer_hold = 1;           // RightStickSteerHoldDistance
+static float g_steer_hold_h = 0.0f;      // the distance held for this steering stretch
+static int   g_steer_hold_valid = 0;     // seeded on the first steering+moving frame, cleared the frame either stops
 #define DEFAULT_ATTACH_FRAMES 10         // ~0.3s before we believe the camera has nothing to follow
 static int g_attach_frames = DEFAULT_ATTACH_FRAMES;  // RightStickAttachedFrames
 static int g_detached = 0;               // consecutive frames with no attached object
@@ -627,6 +632,7 @@ static void load_config(void) {
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
   g_attach_guard = cfg_int(buf, got, "RightStickRequireAttachedCamera", g_attach_guard) ? 1 : 0;
   g_focus_guard  = cfg_int(buf, got, "RightStickYieldToFocusCamera", g_focus_guard) ? 1 : 0;
+  g_steer_hold   = cfg_int(buf, got, "RightStickSteerHoldDistance", g_steer_hold) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -1363,9 +1369,39 @@ static void __cdecl on_camera_updated(void) {
     //
     // Distance and height are the client's business; we only hold the ANGLE. That is the same
     // division that made stick rotation work, applied to the desired point as well as the eye.
-    float near_d = h * (float)g_follow_near / 100.0f;
-    float far_d = h * (float)g_follow_far / 100.0f;
+    // ⭐ ...except while the player is steering AND moving, when the client's distance is held steady.
+    //
+    // 📏 Reported from play as "camera weirdness when rotating continuously while running". Traced, same
+    // map and session, actual camera distance step per 50ms sample (p90):
+    //
+    //     still, stick idle     0.1       moving, stick idle    2.0
+    //     still + steering      0.1       moving + steering     8.2   <-- 4x the pumping, distance 8..88
+    //
+    // The client's desired distance swings whenever the character runs (24..77 even with the stick idle),
+    // but its own lerp smooths that. Rotating the eye every frame while running feeds the swing through
+    // far harder, and the commanded swing itself grows (step p90 9.3 -> 16.3). Not a function of the
+    // camera's angle to the running direction, and not locked to the rotation period -- both measured.
+    //
+    // ⚠ This is NOT the old resting-distance filter coming back. That one was engaged continuously and
+    // re-seeded on engage, which is exactly how it stranded the framing and threw hits to a far view.
+    // This hold exists only while steering+moving, is seeded from the eye's ACTUAL distance (so it never
+    // jumps), and is dropped the frame either stops -- hits and ordinary following have the stick idle,
+    // so they are untouched. A deadzone dip mid-turn just re-seeds from where the camera already is.
+    float use_h = h;
+    float near_d, far_d;
     float want = wrap_angle(g_camera_yaw - ((elen > 0.0f) ? f_atan2(ex, ez) : g_camera_yaw));
+
+    if (g_steer_hold && g_steering && g_target_move > STEER_HOLD_MOVE) {
+      if (!g_steer_hold_valid) {
+        g_steer_hold_h = (elen > 0.01f) ? elen : h;
+        g_steer_hold_valid = 1;
+      }
+      use_h = g_steer_hold_h;
+    } else {
+      g_steer_hold_valid = 0;
+    }
+    near_d = use_h * (float)g_follow_near / 100.0f;
+    far_d = use_h * (float)g_follow_far / 100.0f;
 
     // Steering orbits the eye about the character, preserving its distance.
     if (want != 0.0f && elen > 0.0f) {
