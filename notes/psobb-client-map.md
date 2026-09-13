@@ -593,7 +593,7 @@ Global pointer **`0x00A48A54`** → `0x1D4` bytes (`allocate_in_main_arena(0x1d4
 | `+0x19C` | FOV, passed to the projection setup |
 | `+0x1A0` | **`camera_desired_source`** |
 | `+0x1AC` | **`camera_desired_target`** |
-| `+0x1B8` | a lerp factor, but **not** the one that moves the eye — writing 1.0 changes nothing visible |
+| `+0x1B8` | ⭐ **the LOOK-AT lerp** — 0.67 in play. Not the one that moves the eye (writing 1.0 changes nothing visible). The client sets it to **exactly 0** when it takes the camera for itself, e.g. a focused NPC conversation's close-up — the only camera-struct field that separates conversation from play. |
 | `+0x1BC` | ⭐ **the `camera_source` lerp**, stock value `0.2890` — see below |
 | `+0x1C0` / `+0x1C4` | shake frame counter / scaling |
 | `+0x1C8` | `desired_source_copy`, the "from" end of the collision ray |
