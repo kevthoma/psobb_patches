@@ -1425,7 +1425,21 @@ static void __cdecl on_camera_updated(void) {
 
     if (g_steer_hold && g_steering && g_target_move > STEER_HOLD_MOVE) {
       if (!g_steer_hold_valid) {
-        g_steer_hold_h = (elen > 0.01f) ? elen : h;
+        // ⚠ Seed from the ACTUAL camera's distance to the CHARACTER -- not from elen.
+        //
+        // elen is measured from the orbit anchor, and on the first steering frame the anchor has only
+        // just begun easing from the chase camera's look-ahead point (31 units ahead of a runner) onto
+        // the character. So elen was a mixed-frame distance by construction. Measured over four
+        // steering stretches, the held distance missed the eye's real distance to the character by
+        // 9-26 units (worst 47.8 -> 21.4): a visible zoom the moment steering began, which is exactly
+        // the jump this hold was designed never to cause. camera_source to the live look-at is the
+        // distance the player actually sees, and the one the tracer's `dist` column measures.
+        vec3f* seye = (vec3f*)(cam + OFF_SOURCE);
+        vec3f* slook = (vec3f*)(cam + OFF_TARGET);
+        float sx = seye->x - slook->x, sz = seye->z - slook->z;
+        float sh = f_sqrt(sx * sx + sz * sz);
+
+        g_steer_hold_h = (sh > 0.01f) ? sh : h;
         g_steer_hold_valid = 1;
       }
       use_h = g_steer_hold_h;
