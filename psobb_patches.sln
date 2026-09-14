@@ -13,6 +13,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_gamesettings", "psobb
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_rightstickcamera", "psobb_rightstickcamera\msvc\psobb_rightstickcamera.vcxproj", "{2982227F-DD64-4769-B06A-082BB71B383A}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_updatefix", "psobb_updatefix\msvc\psobb_updatefix.vcxproj", "{7C1E4A52-3B9D-4F0E-9A61-5D2B8E0C41F7}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "d3d8to9", "psobb_widescreen\d3d8to9.vcxproj", "{7EE21ADA-3B02-4CD6-A891-C2257A54B061}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "psobb_dsound", "psobb_dsound\msvc\psobb_dsound.vcxproj", "{96BA4682-7812-4DE1-AADB-FBB3DBA32BE7}"
@@ -43,6 +45,10 @@ Global
 		{2982227F-DD64-4769-B06A-082BB71B383A}.Debug|Win32.Build.0 = Release|Win32
 		{2982227F-DD64-4769-B06A-082BB71B383A}.Release|Win32.ActiveCfg = Release|Win32
 		{2982227F-DD64-4769-B06A-082BB71B383A}.Release|Win32.Build.0 = Release|Win32
+		{7C1E4A52-3B9D-4F0E-9A61-5D2B8E0C41F7}.Debug|Win32.ActiveCfg = Release|Win32
+		{7C1E4A52-3B9D-4F0E-9A61-5D2B8E0C41F7}.Debug|Win32.Build.0 = Release|Win32
+		{7C1E4A52-3B9D-4F0E-9A61-5D2B8E0C41F7}.Release|Win32.ActiveCfg = Release|Win32
+		{7C1E4A52-3B9D-4F0E-9A61-5D2B8E0C41F7}.Release|Win32.Build.0 = Release|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Debug|Win32.ActiveCfg = Debug|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Debug|Win32.Build.0 = Debug|Win32
 		{7EE21ADA-3B02-4CD6-A891-C2257A54B061}.Release|Win32.ActiveCfg = Release|Win32
