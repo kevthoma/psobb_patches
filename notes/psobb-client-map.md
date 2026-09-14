@@ -625,6 +625,43 @@ assumption that the level numbers were incomparable was wrong.)
 
 Height rises with distance (−1.7 → 20.2), so zoom is a pitch-preserving arc, not a pure dolly.
 
+### ⭐ Where the zoom level lives (found 2026-09-13)
+
+Labelled snapshots at every zoom level (globals, the camera state struct and the active controller), with
+one taken while running:
+
+| | Zoom 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| active controller `+0xE4` (float) | 25.00 | 45.42 | 53.60 | 61.80 | 70.00 |
+| active controller `+0xE0` (float, meaning unknown) | 18.00 | 25.43 | 26.90 | 28.40 | 30.00 |
+| global `0x009ACEDC` (u32, zoom index) | 0 | 1 | 2 | 3 | 4 |
+
+Controller = `[0x00A48A00 + byte[0x00A489F4]*4]`, the same one whose `+0x38` mode bits the camera plugin
+already reads. `+0xE4` is **exactly Ephinea's `CameraZoom1..5` defaults**, and it did not change while running.
+
+⚠ **This corrects the table above.** The measured settled distance is `+0xE4` **plus a constant ~4.9** at every
+level. So the "~4.9 units closer" is not Ephinea shifting the ladder: both clients configure the same distances,
+and 4.9 is how far past the configured distance our camera settles, at least as `camtrace` measures it
+(horizontal eye → live look-at). Whether Ephinea settles at the configured value or also 4.9 beyond was measured
+separately and is worth re-checking against this before relying on the old comparison.
+
+`camera_state` itself holds no field that depends on the zoom alone — its distances all move with the camera.
+
+### 📏 How far the camera trails a moving character (2026-09-14)
+
+With the desired eye pinned at a fixed radius around the character, the real eye (`camera_source`, eased toward
+the desired point every frame) settles off that radius in proportion to how fast the character moves along the
+eye direction. One 201 s capture, stick idle, character moving:
+
+| speed away from the eye (u/s) | −60..−40 | −40..−20 | −20..0 | 0..20 | 20..40 | 40..60 |
+|---|---|---|---|---|---|---|
+| distance − standing distance | −11.4 | −7.1 | −4.0 | +1.8 | +11.1 | +13.2 |
+
+A line through it: **0.279 s × speed** (R² 0.45; typical running 33–48 u/s). That is ~3.4× what the `+0x1BC` source
+lerp alone (0.289/frame) would give at 30 fps, so the look-at lerp and our own pivot easing contribute too — measure
+the combined figure rather than deriving it from one lerp. The camera plugin cancels it by leading the desired
+point along the movement by speed × 0.279 s (`RightStickLagCompensation`).
+
 ⛔ **This rules zoom out as the cause of the post-release "rubber band"** — at Zoom 2 we sit at 50.3
 against their 45.4, and 4.9 units cannot produce a 12× difference in settling tail.
 
@@ -790,6 +827,43 @@ Two things that reading the binary cannot settle, both left configurable rather 
 Where the right stick lives is **settled**: the client's own Pad Button Config shows
 `Right Analog Left/Right = PAD Z Axis` and `Right Analog Forward/Backward = PAD Z Rotate`, matching
 the axes observed moving. Base PSO has the bindings; it just never drives a camera with them.
+
+### Main menu view state — "the Start menu is up" (`0x00A97F44`)
+
+A **dword**, recomputed every frame by the code at `0x00709B27`: **`1`** when `0x00716BA0([0x00A9C4F4])`
+reports the main menu, else **`2`** when `0x00718E88([0x00A9C4F4])` does (a second panel state, not yet seen in
+play), else **`0`**. A change starts the slide that moves the 3D view aside — `0x00A97F2C` 960 → 1140,
+`0x00A98498` 480 → 240 — which is why it separates the Start menu from every other window.
+
+📏 **Two labelled whole-data snapshot sets, 2026-09-13** (every writable section, one snapshot per state):
+
+| state | `0x00A97F44` | `0x009FF3D4` (input context) |
+|---|---|---|
+| play: standing, running | `0` | `1` |
+| Start menu, item pack, Pad Button Config | **`1`** | `0` |
+| chat menu (Y) | `0` | `7` |
+| Quick menu (R+Y) | `0` | `0` |
+| shop counter | `0` | `0` |
+
+Used by the right-stick camera (`RightStickYieldToMenus`): while it is non-zero the pad is treated as released,
+so the right stick navigates the menu, as on Ephinea, and the Right Analog rows stay live bindings. Chat and
+the Quick menu keep camera control on purpose.
+
+### Input context (`0x009FF3D4`) — looks like a menu flag, is not one
+
+A **byte**: which binding set the pad is driving, **`1` = gameplay**. Written by `0x00791748(context)`, which
+stores it and, when a pad-config object exists (`0x00A9CCCC`) and the context is not 1, rebuilds the action
+masks at `0x00A9CB50` via `0x0078EEA8`. Over a hundred UI callers, mostly `push 0` as a window opens and
+`push 1` as it closes; a few pass 3–6.
+
+It was the first candidate — the only clean byte across the first snapshot set, `1` through ≈5 minutes of
+running, fights and hits, `0` for the Start menu, counters, chat and gate dialogs. ⚠ **But every window that
+takes the pad switches it**, so it cannot tell the Start menu from the Quick menu (both `0`). Useful for
+"some window has the pad", not for "the Start menu is up".
+
+⚠ **`0x00A21CCC` looked just as clean in the first snapshots and is a trap.** It is the **IME lock** (`0` open,
+`1` locked; see the `stImeOpen:ime is not locked` assert at `0x008410DE` and the `ImmSetOpenStatus` calls beside
+it), with `0x00ADC948` its request mode. It flipped for 5 seconds with no menu up.
 
 ## Structures (protocol side, from newserv — reliable)
 

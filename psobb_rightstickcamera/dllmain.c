@@ -51,45 +51,21 @@
 #define ADDR_UPDATE_CALL    0x004D3B12   // `call 0x004D1FF4` inside UpdateDefaultNPCCameraState
 #define ADDR_SET_POINTS     0x004D1FF4   // set_global_camera_source_and_target(camera behaviour obj)
 #define ADDR_CAMERA_STATE   0x00A48A54   // -> camera_state_struct*, 0x1D4 bytes
-// Pad Button Config menu. The row loop's common tail runs once per row for all 16 rows, with the
-// row index in EBX and that row's text widget in ECX, AFTER the row's value label has been written:
+// ⭐ The MAIN MENU's view state: 0 = no panel, 1 while the Start menu -- or anything opened from it, such
+// as the item pack or Pad Button Config -- has the screen, 2 for a second panel state not yet seen in
+// play. Recomputed every frame by the code at 0x00709B27: 1 when 0x00716BA0([0x00A9C4F4]) reports it,
+// else 2 when 0x00718E88 does, else 0. A change starts the slide that moves the 3D view aside
+// (0x00A97F2C 960 -> 1140, 0x00A98498 480 -> 240), so this is the client's own "the menu has the screen".
 //
-//   00790D9A  mov ecx, [edi+0x2C]      ; the row's text widget
-//   00790D9D  call 0x0072E0E4          ; <- retargeted; we overwrite rows 2 and 3 first
-//   00790DA8  cmp ebx, 0x10            ; 16 rows
+// 📏 Two labelled snapshot sets, 2026-09-13: 1 in all four Start-menu samples, the item pack and Pad Button
+// Config; 0 in play (standing, running), the chat menu, the Quick menu (R+Y) and a shop counter. The chat
+// and Quick menus reading 0 is the point -- camera control stays live in both, as it does on Ephinea.
 //
-// Hooking the shared tail rather than either label branch means one call site instead of two, and it
-// does not matter which branch (axis names at 0x0097B264, button names at 0x0097B2E4) produced the
-// text -- we simply replace it afterwards.
-#define ADDR_PADROW_CALL    0x00790D9D   // `call 0x0072E0E4` -- the per-row tail
-#define ADDR_TEXT_SPACE     0x0072E0E4   // __thiscall(ecx = widget), what that call went to
-#define ADDR_TEXT_SETTEXT   0x0072DB60   // __thiscall(ecx = widget, wchar_t*, int) -- CALLEE cleans
-
-// Which rows are the right analog axes. Row order is the menu's own: 0 Move L/R, 1 Move F/B,
-// 2 Right Analog L/R, 3 Right Analog F/B, then the buttons. Confirmed against the in-game screen.
-// Greying a row out, using the client's OWN mechanism rather than an invented one.
-// ChatShortcutMenuYesNoWindow_SetItemColorById @ 0x00738A9C is how the client disables a menu entry:
-//
-//   *(u32*)(item + 0x24) = 0xFF909090;   // grey
-//   *(u16*)(item + 4)   &= 0xFFFE;       // clear bit 0
-//
-// Both halves are corroborated by ListWindowObject_AddListItem @ 0x00735C90, which initialises
-// +0x24 to 0xFFFFFFFF (so +0x24 is the colour) and sets bit 0 of the same flags word when the
-// caller passes has_cursor (so bit 0 is the cursor/selectable bit).
-//
-// We replicate it inline rather than calling 0x00738A9C, because that function also requires bit 2
-// of the flags word to be set and it is not known whether the pad config's rows have it -- a
-// precondition that fails silently is worse than three field writes.
-#define LIST_LINES_PTR      0x28         // list window -> array of line objects
-#define LIST_NUM_LINES      0x8A         // short
-#define ITEM_FLAGS          0x04         // ushort; bit 0 = has cursor / selectable
-#define ITEM_VALUE          0x18         // the item_index passed to AddListItem
-#define ITEM_COLOR          0x24         // ARGB, 0xFFFFFFFF when added
-#define ITEM_GREY           0xFF909090   // the client's own disabled grey
-#define OFF_MENU_LIST       0x24         // menu object -> the 16-row list window
-
-#define PAD_ROW_RSTICK_X    2
-#define PAD_ROW_RSTICK_Y    3
+// ⚠ NOT the input context byte (0x009FF3D4). That looked right first -- 1 in play, 0 in the Start menu --
+// but EVERY window that takes the pad switches it: the Quick menu reads 0 exactly like the Start menu, and
+// chat reads 7. And NOT 0x00A21CCC, the IME lock, which flipped for 5s with no menu up.
+#define ADDR_MENU_VIEW      0x00A97F44   // dword
+#define ADDR_INPUT_CONTEXT  0x009FF3D4   // byte -- logged in diagnostic builds only, see above
 
 #define ADDR_MENU_FLAGS     0x00A489FC   // g_GenericMenuSubSelection
 
@@ -138,6 +114,15 @@
 #define ADDR_CAM_CTRL_ARRAY 0x00A48A00   // controller* [4]
 #define OFF_CTRL_MODE       0x38
 #define CTRL_MODE_SMOOTHED  0x0C         // either lerp bit set = the client is smoothing = ordinary play
+// ⭐ The ZOOM LEVEL's configured distance, a float in the active controller -- stable while running.
+//
+// 📏 Labelled snapshots at every zoom level, 2026-09-13 (the only controller field that depended on the zoom
+// alone and was unchanged while running): 25.00 / 45.42 / 53.60 / 61.80 / 70.00 -- exactly Ephinea's
+// CameraZoom1..5 defaults. The settled horizontal eye distance measured earlier is that plus a constant
+// ~4.9 at every level (30.0 / 50.3 / 58.5 / 66.6 / 75.0), which is what ZOOM_REST_OFFSET restores.
+// (The zoom INDEX, 0..4, is also a global at 0x009ACEDC; the distance is the more useful of the two.)
+#define OFF_CTRL_ZOOM_DIST  0xE4
+#define ZOOM_REST_OFFSET    4.9f
 #define OFF_ATTACH          0x090        // object pointer; NULL whenever there is no character
 // (+0x084 and +0x1C4 are two more object pointers. They are null on the MENU camera but still live
 // on ship select and the loading screen, so they do not separate those -- see below.)
@@ -302,6 +287,8 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 static int g_attach_guard = 1;           // RightStickRequireAttachedCamera
 // Off switch for the focused-camera yield below, in case some state zeroes the look-at lerp during play.
 static int g_focus_guard = 1;            // RightStickYieldToFocusCamera
+// Off switch for the menu yield: while the Start menu is up, the right stick is navigating it.
+static int g_menu_guard = 1;             // RightStickYieldToMenus
 // ⭐ Hold the camera's distance steady while steering AND moving. See the note at the distance block.
 #define STEER_HOLD_MOVE     0.5f         // look-at units/frame counted as moving; running measures ~1.5
 static int   g_steer_hold = 1;           // RightStickSteerHoldDistance
@@ -309,6 +296,8 @@ static float g_steer_hold_h = 0.0f;      // the distance held for this steering 
 static int   g_steer_hold_valid = 0;     // seeded on the first steering+moving frame, cleared the frame either stops
 // ⭐ While steering, orbit the CHARACTER rather than the chase camera's look-ahead point. See the eye block.
 static int   g_orbit_live = 1;           // RightStickOrbitCharacter
+// ⭐ Keep that pivot on the character while HOLDING an angle too, not only while steering. See the anchor block.
+static int   g_orbit_hold = 1;           // RightStickOrbitWhileHolding
 static float g_anchor_blend = 0.0f;      // 0 = desired look-at (client geometry), 1 = live look-at (the character)
 #define DEFAULT_ATTACH_FRAMES 10         // ~0.3s before we believe the camera has nothing to follow
 static int g_attach_frames = DEFAULT_ATTACH_FRAMES;  // RightStickAttachedFrames
@@ -529,6 +518,15 @@ static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
 static float g_target_move = 0.0f;       // this frame's look-at movement, computed ONCE per frame
 static int   g_have_prev_target = 0;
 static int   g_warped = 0;               // set when that movement looks like a teleport
+// ⭐ Trailing compensation. See the note at the desired-source write.
+#define LAG_SECONDS         0.279f       // measured: distance - rest = 0.279 s x speed away from the eye (R^2 0.45)
+#define LEAD_MAX            25.0f        // world units; the most the commanded eye may be led
+#define LEAD_MOVE_CAP       8.0f         // per-frame look-at movement above this is a knockback, not running
+static int   g_lag_comp = 100;           // RightStickLagCompensation, percent; 0 = off
+static float g_move_x = 0.0f, g_move_z = 0.0f;   // smoothed per-frame look-at movement, x/z
+static DWORD g_rate_tick0 = 0;           // frame-rate estimate: calls counted over >= 1s of GetTickCount
+static int   g_rate_frames = 0;
+static float g_frame_rate = 30.0f;
 
 // ⚠ Recentring is NOT instantaneous, and treating it as such is a bug.
 //
@@ -635,8 +633,13 @@ static void load_config(void) {
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
   g_attach_guard = cfg_int(buf, got, "RightStickRequireAttachedCamera", g_attach_guard) ? 1 : 0;
   g_focus_guard  = cfg_int(buf, got, "RightStickYieldToFocusCamera", g_focus_guard) ? 1 : 0;
+  g_menu_guard   = cfg_int(buf, got, "RightStickYieldToMenus", g_menu_guard) ? 1 : 0;
   g_steer_hold   = cfg_int(buf, got, "RightStickSteerHoldDistance", g_steer_hold) ? 1 : 0;
   g_orbit_live   = cfg_int(buf, got, "RightStickOrbitCharacter", g_orbit_live) ? 1 : 0;
+  g_orbit_hold   = cfg_int(buf, got, "RightStickOrbitWhileHolding", g_orbit_hold) ? 1 : 0;
+  g_lag_comp     = cfg_int(buf, got, "RightStickLagCompensation", g_lag_comp);
+  if (g_lag_comp < 0) g_lag_comp = 0;
+  if (g_lag_comp > 200) g_lag_comp = 200;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -951,90 +954,23 @@ static void resume_camera(void) {
   g_eye_valid = 0;                       // re-seeded from the client's own eye next frame
 }
 
-// ---------------------------------------------------------------------------
-// Pad Button Config: show the right analog rows as taken, while the camera owns them
-//
-// While the camera owns the right stick, the two Right Analog rows are greyed out, lose their
-// cursor, and report what has taken them. Whatever they are bound to is not reaching the game, so
-// showing them as live bindings is a lie.
-//
-// The greying is the client's OWN mechanism, not an invented one -- see ITEM_COLOR/ITEM_FLAGS above.
-//
-// Nothing is written to the character's key config. The bindings are left exactly as the player set
-// them, which matters because on Blue Burst that config syncs to the server: clearing it would
-// persist after the camera was switched off again.
-// ---------------------------------------------------------------------------
-static const wchar_t RSC_ROW_TEXT[] = L"-- Camera --";
+// The horizontal distance the camera settles at, standing still, for the player's zoom level -- read from
+// the active controller rather than inferred from the camera, because the camera's own distance is not a
+// fixed target while running (see the anchor block). 0 when it cannot be read or looks wrong.
+static float zoom_rest_distance(void) {
+  BYTE idx = *(BYTE*)ADDR_CAM_CTRL_INDEX;
+  DWORD ctl;
+  float z;
 
-// Safe to hand the client a static string: its own callers pass static globals here (the axis and
-// button name tables at 0x0097B264 / 0x0097B2E4), so this setter cannot be taking ownership.
-static void pad_row_set_text(void* widget, const wchar_t* text) {
-  __asm {
-    push 0x20
-    push text
-    mov  ecx, widget
-    mov  eax, ADDR_TEXT_SETTEXT
-    call eax                                             // ret 8: callee cleans both arguments
-  }
-}
-
-// Grey a text object and take its cursor away, exactly as 0x00738A9C does.
-static void grey_item(BYTE* item) {
-  if (!item)
-    return;
-  *(DWORD*)(item + ITEM_COLOR) = ITEM_GREY;
-  *(WORD*)(item + ITEM_FLAGS) = (WORD)(*(WORD*)(item + ITEM_FLAGS) & 0xFFFE);
-}
-
-// The left-hand column is a list item, found by the value AddListItem was given -- which for this
-// menu is the row index.
-static void grey_list_row(BYTE* list, int value) {
-  BYTE** lines;
-  int n, i;
-
-  if (!list)
-    return;
-  lines = *(BYTE***)(list + LIST_LINES_PTR);
-  n = (int)*(short*)(list + LIST_NUM_LINES);
-  if (!lines || n <= 0 || n > 256)
-    return;                              // not the shape we expect: do nothing rather than scribble
-  for (i = 0; i < n; i++) {
-    BYTE* item = lines[i];
-    if (item && *(int*)(item + ITEM_VALUE) == value)
-      grey_item(item);
-  }
-}
-
-static void __cdecl on_pad_row(void* widget, int row, void* menu) {
-  if (!g_enabled || !widget)
-    return;                              // classic controls: leave the menu exactly as it was
-  if (row != PAD_ROW_RSTICK_X && row != PAD_ROW_RSTICK_Y)
-    return;
-
-  // Right-hand column: say what has taken the binding, and grey it.
-  pad_row_set_text(widget, RSC_ROW_TEXT);
-  grey_item((BYTE*)widget);
-
-  // Left-hand column: grey the row name and drop its cursor, so it reads as unavailable and the
-  // selection no longer highlights it.
-  if (menu)
-    grey_list_row(*(BYTE**)((BYTE*)menu + OFF_MENU_LIST), row);
-}
-
-// Replaces `call 0x0072E0E4`. ECX is the row's text widget and EBX the row index; both survive
-// pushad/popad, and the original is tail-jumped so its ret lands after our call site.
-void __declspec(naked) padRowHook(void) {
-  __asm {
-    pushad
-    push esi                                             // the menu object (rows are esi+row*4+0x2C)
-    push ebx                                             // row index
-    push ecx                                             // this row's text widget
-    call on_pad_row
-    add  esp, 0xC
-    popad
-    mov  eax, ADDR_TEXT_SPACE
-    jmp  eax
-  }
+  if (idx >= 4)
+    return 0.0f;
+  ctl = *(DWORD*)(ADDR_CAM_CTRL_ARRAY + (DWORD)idx * 4);
+  if (!ctl)
+    return 0.0f;
+  z = *(float*)(ctl + OFF_CTRL_ZOOM_DIST);
+  if (!(z > 5.0f && z < 500.0f))         // also rejects NaN
+    return 0.0f;
+  return z + ZOOM_REST_OFFSET;
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,6 +992,25 @@ static void __cdecl on_camera_updated(void) {
   int have_pad, recentre;
 
   g_frames++;
+
+  // Calls per second, re-estimated every second. GetTickCount is coarse per frame but exact over a
+  // second, and it keeps the trailing compensation in SECONDS whatever the client's frame rate is.
+  // (No QueryPerformanceCounter: 64-bit division needs the CRT this plugin does not link.)
+  {
+    DWORD now = GetTickCount();
+
+    if (!g_rate_tick0)
+      g_rate_tick0 = now;
+    g_rate_frames++;
+    if (now - g_rate_tick0 >= 1000) {
+      float fr = (float)g_rate_frames * 1000.0f / (float)(int)(now - g_rate_tick0);
+
+      if (fr > 5.0f && fr < 400.0f)
+        g_frame_rate = fr;
+      g_rate_tick0 = now;
+      g_rate_frames = 0;
+    }
+  }
 
   // Pick up a changed widescreen.cfg while the game is running, so toggling the launcher's
   // checkbox takes effect without restarting the client -- or reinstalling anything.
@@ -1085,6 +1040,17 @@ static void __cdecl on_camera_updated(void) {
   // and counts down the rescan backoff -- so calling it a second time just for the log would make
   // diagnostic builds behave differently from release ones.
   have_pad = read_pad(&pad);
+
+  // ⭐ The Start menu is up, so the right stick is navigating it. Treat the WHOLE pad as released --
+  // sticks, triggers and buttons -- so the camera does exactly what it does when nobody touches it, and a
+  // trigger pressed to page through the menu cannot fire a recentre. It is also why the Right Analog rows
+  // in Pad Button Config are left alone: inside the menu they are what the stick does. The chat and Quick
+  // menus deliberately do not count -- see ADDR_MENU_VIEW.
+  if (have_pad && g_menu_guard && *(DWORD*)ADDR_MENU_VIEW != 0) {
+    pad.rx = pad.ry = pad.lx = pad.ly = 0.0f;
+    pad.buttons = 0;
+    pad.lt = pad.rt = 0;
+  }
 
   // Recentre on the PRESS, not every frame the control is held: holding it would otherwise pin the
   // offset at zero and make the stick appear dead.
@@ -1127,6 +1093,13 @@ static void __cdecl on_camera_updated(void) {
 
     g_target_move = f_sqrt(mx * mx + my * my + mz * mz);
     g_warped = g_have_prev_target && (g_target_move > WARP_UNITS);
+    if (g_have_prev_target && !g_warped && g_target_move < LEAD_MOVE_CAP) {
+      g_move_x += (mx - g_move_x) * 0.5f;
+      g_move_z += (mz - g_move_z) * 0.5f;
+    } else {
+      g_move_x = 0.0f;                   // a warp or knockback must never throw the camera
+      g_move_z = 0.0f;
+    }
     g_prev_target = *live_tgt;
     g_have_prev_target = 1;
   }
@@ -1139,15 +1112,16 @@ static void __cdecl on_camera_updated(void) {
     // likely to be visible in those three than in our offset.
     float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
     rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
-             "menuflags=%08X | holding=%d yaw=%d/1000 pitch=%d/1000 | "
-             "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d",
+             "menuflags=%08X ctx=%d menu=%d | holding=%d yaw=%d/1000 pitch=%d/1000 | "
+             "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d zoomrest=%d",
              g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
              f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
-             flags, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
+             flags, *(BYTE*)ADDR_INPUT_CONTEXT, *(DWORD*)ADDR_MENU_VIEW, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
              f_toint(g_pitch_offset * 1000.0f),
              f_toint(f_atan2(ax, az) * 1000.0f), f_toint(f_sqrt(ax * ax + az * az)), f_toint(ay),
              f_toint(g_target_move * 100.0f),
-             (g_freeze_chase && g_have_yaw) ? 1 : 0, f_toint(g_hold_h), f_toint(g_hold_y));
+             (g_freeze_chase && g_have_yaw) ? 1 : 0, f_toint(g_hold_h), f_toint(g_hold_y),
+             f_toint(zoom_rest_distance()));
   }
 #endif
 
@@ -1377,7 +1351,16 @@ static void __cdecl on_camera_updated(void) {
     vec3f* live = (vec3f*)(cam + OFF_TARGET);
     float step = 1.0f / (float)g_snap_frames;
 
-    g_anchor_blend += (g_orbit_live && g_steering) ? step : -step;
+    // ⭐ ...and while an angle is merely HELD, not just while steering.
+    //
+    // 📏 Reported from play 2026-09-13 as "the camera zooms in too much". ChaseCam=Disabled holds the angle
+    // indefinitely, so most running happens with the stick idle and the pivot back on the look-ahead point.
+    // With the camera trailing the runner, that point is on the far side of the character, so the eye sat
+    // up to the whole look-ahead closer to the character than intended. Two captures, moving, camera behind:
+    // eye-to-character median 27-28 (17-20% of running time under 20), against 60 for the same state on the
+    // earlier lap test. Commanded distance there 42-43, look-ahead 31.7 -- 43 - 31.7 plus the eye's normal
+    // trailing lag is the 27 measured; pivoting on the character predicts ~59, the plain chase camera's 60.
+    g_anchor_blend += (g_orbit_live && (g_steering || (g_orbit_hold && g_have_yaw))) ? step : -step;
     if (g_anchor_blend > 1.0f) g_anchor_blend = 1.0f;
     if (g_anchor_blend < 0.0f) g_anchor_blend = 0.0f;
     anchor.x = tgt->x + (live->x - tgt->x) * g_anchor_blend;
@@ -1422,6 +1405,22 @@ static void __cdecl on_camera_updated(void) {
     float use_h = h;
     float near_d, far_d;
     float want = wrap_angle(g_camera_yaw - ((elen > 0.0f) ? f_atan2(ex, ez) : g_camera_yaw));
+
+    // ⭐ Pivoting on the character needs a radius measured from the character -- and h is not one.
+    //
+    // h is the client's distance from its LOOK-AHEAD point, and it is not a fixed target: when the character
+    // starts running the look-ahead jumps ~31 units out and h grows with it. Orbiting the character at h is
+    // what the first cut of RightStickOrbitWhileHolding did, and it traded the zoom-in for a zoom-out.
+    // 📏 One 300s capture on that build: running with the camera behind, median 70.8 (51% of the time over
+    // 70), and 6 of 9 movement starts pushed the camera out by more than 20 units (median +31.9) -- against
+    // a standing distance of 50.0 at Zoom 2. So the radius is the ZOOM's own resting distance instead, eased
+    // in with the pivot. The eye still trails a runner through the client's own lerp, as it always did.
+    if (g_orbit_hold) {
+      float zr = zoom_rest_distance();
+
+      if (zr > 0.0f)
+        use_h = h + (zr - h) * g_anchor_blend;
+    }
 
     if (g_steer_hold && g_steering && g_target_move > STEER_HOLD_MOVE) {
       if (!g_steer_hold_valid) {
@@ -1516,9 +1515,40 @@ static void __cdecl on_camera_updated(void) {
     *(float*)(cam + OFF_LERP_SOURCE) = g_last_lerp;
   }
 
-  src->x = anchor.x + nx;
-  src->y = anchor.y + ny;
-  src->z = anchor.z + nz;
+  // ⭐ Lead the commanded eye by how far the real one is about to trail.
+  //
+  // The client eases camera_source toward this point a fraction per frame, so against a moving character
+  // the eye always settles behind where we put it -- further out when the character runs away from the
+  // camera, closer when it runs toward it. With the radius pinned to the zoom level, that trailing is the
+  // whole of the "zooms out slightly when I start moving" reported from play.
+  // 📏 One 201s capture on the zoom-radius build, holding (stick idle) while moving, distance minus the
+  // standing distance against speed away from the eye:
+  //     -60..-40 u/s  -11.4     -40..-20  -7.1     -20..0  -4.0     0..20  +1.8     20..40  +11.1     40..60  +13.2
+  // A straight line through that is 0.279 s x speed (typical running 33-48 u/s). Leading by speed x 0.279 s
+  // along the movement cancels it at steady speed, in either direction.
+  //
+  // ⚠ Added to the WRITTEN point only, never to g_eye: g_eye is next frame's angle reference, and a lead
+  // folded into it would skew the held angle a little more every frame. Scaled by the pivot blend, so it
+  // exists only while we orbit the character, and zeroed on warps and knockbacks (see g_move_x).
+  {
+    float lead_x = 0.0f, lead_z = 0.0f;
+
+    if (g_orbit_hold && g_lag_comp > 0 && g_anchor_blend > 0.0f) {
+      float k = g_frame_rate * LAG_SECONDS * ((float)g_lag_comp / 100.0f) * g_anchor_blend;
+      float len;
+
+      lead_x = g_move_x * k;
+      lead_z = g_move_z * k;
+      len = f_sqrt(lead_x * lead_x + lead_z * lead_z);
+      if (len > LEAD_MAX) {
+        lead_x *= LEAD_MAX / len;
+        lead_z *= LEAD_MAX / len;
+      }
+    }
+    src->x = anchor.x + nx + lead_x;
+    src->y = anchor.y + ny;
+    src->z = anchor.z + nz + lead_z;
+  }
 
   // ⭐ While steering, put the EYE there too, not just the point we want it to head for.
   //
@@ -1603,32 +1633,6 @@ void __declspec(naked) cameraHook(void) {
 // No VirtualProtect: this client's .text is already RWX, which is why no other plugin in this repo
 // unprotects either. If that ever changes, every plugin here breaks together and loudly.
 // ---------------------------------------------------------------------------
-// Separate from the camera patch on purpose: this one is cosmetic, and a guard failure here must
-// not cost the actual feature.
-static BOOL patch_pad_menu(void) {
-  DWORD target;
-
-  // mov ecx, [edi+0x2C] -- the widget load immediately before the call we are replacing.
-  if (*(BYTE*)(ADDR_PADROW_CALL - 3) != 0x8B ||
-      *(BYTE*)(ADDR_PADROW_CALL - 2) != 0x4F ||
-      *(BYTE*)(ADDR_PADROW_CALL - 1) != 0x2C)
-    return FALSE;
-  // cmp ebx, 0x10 -- the 16-row loop bound, 11 bytes past the call. Confirms this is the row loop
-  // and not some other site that happens to load a widget the same way.
-  if (*(BYTE*)(ADDR_PADROW_CALL + 11) != 0x83 ||
-      *(BYTE*)(ADDR_PADROW_CALL + 12) != 0xFB ||
-      *(BYTE*)(ADDR_PADROW_CALL + 13) != 0x10)
-    return FALSE;
-  if (*(BYTE*)ADDR_PADROW_CALL != 0xE8)
-    return FALSE;
-  target = (DWORD)(ADDR_PADROW_CALL + 5 + *(LONG*)(ADDR_PADROW_CALL + 1));
-  if (target != ADDR_TEXT_SPACE)
-    return FALSE;
-
-  *(DWORD*)(ADDR_PADROW_CALL + 1) = calc_disp32(ADDR_PADROW_CALL + 1, (ULONG_PTR)padRowHook);
-  return TRUE;
-}
-
 static BOOL patch_camera(void) {
   DWORD target;
 
@@ -1663,20 +1667,16 @@ __declspec(dllexport) void __stdcall load(void) {
   // be changeable at runtime; it checks g_enabled every frame and returns immediately when off,
   // which costs a compare and leaves the client's camera untouched. Skipping the patch here would
   // make turning the feature on require a client restart.
-  if (!patch_pad_menu())
-    rsc_log("pad menu NOT patched: row-loop signature did not match at %08X "
-            "(right analog rows will still show their bindings)", ADDR_PADROW_CALL);
-
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
-            g_recentre_mask, g_suppress,
+            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {

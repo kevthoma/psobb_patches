@@ -79,8 +79,11 @@ Settings live in `widescreen.cfg`:
 | `RightStickRequireAttachedCamera` | `1` | Do not drive the camera when there is no character to follow -- the hook runs in **every** scene, so without this the stick swings the title screen, character select, ship select and the loading screen. |
 | `RightStickAttachedFrames` | `10` | Frames the camera must have nothing attached before we believe it. Debounced so a transient null during a warp cannot drop the held angle mid-play. |
 | `RightStickYieldToFocusCamera` | `1` | Hand the camera back whenever the client is directing it itself -- the close-up during a focused NPC conversation, and the focus camera a quest takes on entry. Detected two ways: the client zeroing its look-at lerp (`+0x1B8`), and the active camera controller switching to snap mode (neither lerp bit set at controller `+0x38`). The angle you held beforehand is resumed afterwards. |
+| `RightStickYieldToMenus` | `1` | Ignore the pad while the **Start menu** is up, including anything opened from it (item pack, Pad Button Config). There the right stick navigates the menu, as it does on Ephinea, and the camera behaves exactly as if the stick were untouched. The chat menu and the Quick menu (R+Y) deliberately keep camera control. Detected from the main menu's own view state (`0x00A97F44`), the value that slides the 3D view aside when the menu opens. |
 | `RightStickSteerHoldDistance` | `1` | While you steer **and** move, hold the camera's distance steady instead of following the client's own, which swings as you run. Without it, rotating continuously while running pumped the camera in and out (distance 8-88, four times the frame-to-frame movement of running with the stick idle). Seeded from the camera's actual distance when steering starts and released the moment either stops, so ordinary following and hits are unaffected. |
 | `RightStickOrbitCharacter` | `1` | While you steer, rotate the camera around your **character** rather than around the point the game aims ahead of you while running (measured about 31 units ahead). Orbiting that look-ahead point made the camera's distance to you swing with the angle -- further when the camera was ahead of you, closer when behind -- which was the remaining pumping when rotating while running. The view still looks ahead; only the pivot changes, eased in and out. |
+| `RightStickOrbitWhileHolding` | `1` | Keep that pivot on your character while the camera is merely **holding** an angle, not only while you steer, at the resting distance of **your zoom level** (read from the game's camera controller). Without it, running with the camera behind you in ChaseCam Disabled placed the camera around the look-ahead point on the far side of your character, so it sat far too close: median 27 units while running, against about 60 for an ordinary chase camera. Orbiting at the game's own distance instead overshot the other way (median 71, zooming out by ~30 every time you started moving), because that distance grows the moment you start running; the zoom level's distance does not. |
+| `RightStickLagCompensation` | `100` | Percent. While the camera holds an angle around your character, aim it ahead along your movement by the amount it is about to trail behind, so it stays at your zoom level's distance while you run instead of drifting out when you run away from it (and in when you run toward it). Measured trailing: 0.279 s × your speed, about 11-13 units at a normal run. Capped at 25 units and switched off for warps and knockbacks. `0` turns it off. |
 | `RightStickCameraLerp` | `0` | Override the client's own camera lerp (`+0x1BC`), percent per frame. **Leave at 0.** It is the distance/collision smoothing, not the angular lag; forcing it drives the eye into scenery. |
 | `RightStickFollowNear` / `RightStickFollowFar` | `100` / `100` | Follow band, as a percentage of the chase camera's distance. Both `100` (the default, and the only configuration that has been measured) means the camera tracks rigidly at the client's own distance. |
 | `RightStickFreezeChase` | `0` | Hold the eye distance and height while steering. Off -- the client owning distance is what fixed the framing jumping about between runs. |
@@ -117,16 +120,15 @@ outright; live `rx`/`ry` that move the camera wrongly points somewhere else enti
 pitch the two end up solving for height at the same time and it reads oddly in play. Set
 `RightStickPitch=1` to try it.
 
-**The Pad Button Config screen reflects it.** While the camera is enabled, the two **Right Analog**
-rows are greyed out, lose their selection cursor, and read `-- Camera --` instead of their bindings —
-because whatever they are bound to is not reaching the game. Turning the feature off restores them.
+**The Start menu keeps the right stick.** While the Start menu is up — or anything opened from it, such
+as the item pack or Pad Button Config — the camera ignores the pad entirely and behaves exactly as if the
+stick were untouched, so the stick navigates the menu instead. That matches Ephinea. The chat menu (Y) and
+the Quick menu (R+Y) are different on purpose: camera control stays live in both.
 
-The greying is the client's own mechanism, not an invented one: it is exactly what the game does to
-disable a menu entry elsewhere (colour `0xFF909090`, and the item's cursor bit cleared).
-
-Nothing is written to your key config. The bindings are left exactly as you set them — which matters
-on Blue Burst, where that config syncs to the server, so clearing it would persist after you switched
-the camera back off.
+It is also why the **Right Analog** rows in Pad Button Config are ordinary, mappable bindings. An earlier
+build greyed them out and labelled them `-- Camera --`, on the reasoning that the camera had taken the
+stick. With the menu handed back, those bindings are live again wherever they matter. Nothing was ever
+written to your key config either way.
 
 **Turning is two fixed speeds, not proportional control.** Past the deadzone the camera turns at a
 constant slow speed, stepping up to a constant fast speed past half deflection. That is measured from
