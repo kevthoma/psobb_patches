@@ -271,3 +271,39 @@ jobs:
             psobb_rightstickcamera/bin/rightstickcamera.pdb
             psobb_rightstickcamera/bin_diag/rightstickcamera.asi
           if-no-files-found: error
+
+  updatefix:
+    # ASI plugin: lets the patch server update a file the game already has loaded. psobb.exe loads
+    # every plugin before it patches, Windows will not delete a mapped image, and the client's
+    # close-file handler ignores that failure -- so without this, an updated patches/*.asi loops
+    # forever (corellia-build#7). Guarded at runtime by the exact bytes it replaces, so what CI
+    # protects is that it still compiles. 32-bit, same as the client.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build psobb_updatefix (Release|Win32)
+        # Same toolset pin as the other jobs: the runner's VS is newer than the version the
+        # vcxproj selects for, so name v143 rather than falling back to an absent v141.
+        run: >
+          msbuild psobb_updatefix\msvc\psobb_updatefix.vcxproj
+          /p:Configuration=Release
+          /p:Platform=Win32
+          /p:PlatformToolset=v143
+          /p:WindowsTargetPlatformVersion=10.0
+          /m /v:minimal
+
+      - name: Show build output
+        run: dir psobb_updatefix\bin
+
+      - name: Upload updatefix.asi (+ symbols)
+        uses: actions/upload-artifact@v7
+        with:
+          name: updatefix-Release-Win32
+          path: |
+            psobb_updatefix/bin/updatefix.asi
+            psobb_updatefix/bin/updatefix.pdb
+          if-no-files-found: error
