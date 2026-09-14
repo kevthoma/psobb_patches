@@ -287,6 +287,8 @@ static float g_steer_hold_h = 0.0f;      // the distance held for this steering 
 static int   g_steer_hold_valid = 0;     // seeded on the first steering+moving frame, cleared the frame either stops
 // ⭐ While steering, orbit the CHARACTER rather than the chase camera's look-ahead point. See the eye block.
 static int   g_orbit_live = 1;           // RightStickOrbitCharacter
+// ⭐ Keep that pivot on the character while HOLDING an angle too, not only while steering. See the anchor block.
+static int   g_orbit_hold = 1;           // RightStickOrbitWhileHolding
 static float g_anchor_blend = 0.0f;      // 0 = desired look-at (client geometry), 1 = live look-at (the character)
 #define DEFAULT_ATTACH_FRAMES 10         // ~0.3s before we believe the camera has nothing to follow
 static int g_attach_frames = DEFAULT_ATTACH_FRAMES;  // RightStickAttachedFrames
@@ -616,6 +618,7 @@ static void load_config(void) {
   g_menu_guard   = cfg_int(buf, got, "RightStickYieldToMenus", g_menu_guard) ? 1 : 0;
   g_steer_hold   = cfg_int(buf, got, "RightStickSteerHoldDistance", g_steer_hold) ? 1 : 0;
   g_orbit_live   = cfg_int(buf, got, "RightStickOrbitCharacter", g_orbit_live) ? 1 : 0;
+  g_orbit_hold   = cfg_int(buf, got, "RightStickOrbitWhileHolding", g_orbit_hold) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -1281,7 +1284,16 @@ static void __cdecl on_camera_updated(void) {
     vec3f* live = (vec3f*)(cam + OFF_TARGET);
     float step = 1.0f / (float)g_snap_frames;
 
-    g_anchor_blend += (g_orbit_live && g_steering) ? step : -step;
+    // ⭐ ...and while an angle is merely HELD, not just while steering.
+    //
+    // 📏 Reported from play 2026-09-13 as "the camera zooms in too much". ChaseCam=Disabled holds the angle
+    // indefinitely, so most running happens with the stick idle and the pivot back on the look-ahead point.
+    // With the camera trailing the runner, that point is on the far side of the character, so the eye sat
+    // up to the whole look-ahead closer to the character than intended. Two captures, moving, camera behind:
+    // eye-to-character median 27-28 (17-20% of running time under 20), against 60 for the same state on the
+    // earlier lap test. Commanded distance there 42-43, look-ahead 31.7 -- 43 - 31.7 plus the eye's normal
+    // trailing lag is the 27 measured; pivoting on the character predicts ~59, the plain chase camera's 60.
+    g_anchor_blend += (g_orbit_live && (g_steering || (g_orbit_hold && g_have_yaw))) ? step : -step;
     if (g_anchor_blend > 1.0f) g_anchor_blend = 1.0f;
     if (g_anchor_blend < 0.0f) g_anchor_blend = 0.0f;
     anchor.x = tgt->x + (live->x - tgt->x) * g_anchor_blend;
@@ -1544,13 +1556,13 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
-            g_recentre_mask, g_suppress, g_menu_guard,
+            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
