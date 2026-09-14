@@ -518,6 +518,15 @@ static vec3f g_prev_target = { 0.0f, 0.0f, 0.0f };
 static float g_target_move = 0.0f;       // this frame's look-at movement, computed ONCE per frame
 static int   g_have_prev_target = 0;
 static int   g_warped = 0;               // set when that movement looks like a teleport
+// ⭐ Trailing compensation. See the note at the desired-source write.
+#define LAG_SECONDS         0.279f       // measured: distance - rest = 0.279 s x speed away from the eye (R^2 0.45)
+#define LEAD_MAX            25.0f        // world units; the most the commanded eye may be led
+#define LEAD_MOVE_CAP       8.0f         // per-frame look-at movement above this is a knockback, not running
+static int   g_lag_comp = 100;           // RightStickLagCompensation, percent; 0 = off
+static float g_move_x = 0.0f, g_move_z = 0.0f;   // smoothed per-frame look-at movement, x/z
+static DWORD g_rate_tick0 = 0;           // frame-rate estimate: calls counted over >= 1s of GetTickCount
+static int   g_rate_frames = 0;
+static float g_frame_rate = 30.0f;
 
 // ⚠ Recentring is NOT instantaneous, and treating it as such is a bug.
 //
@@ -628,6 +637,9 @@ static void load_config(void) {
   g_steer_hold   = cfg_int(buf, got, "RightStickSteerHoldDistance", g_steer_hold) ? 1 : 0;
   g_orbit_live   = cfg_int(buf, got, "RightStickOrbitCharacter", g_orbit_live) ? 1 : 0;
   g_orbit_hold   = cfg_int(buf, got, "RightStickOrbitWhileHolding", g_orbit_hold) ? 1 : 0;
+  g_lag_comp     = cfg_int(buf, got, "RightStickLagCompensation", g_lag_comp);
+  if (g_lag_comp < 0) g_lag_comp = 0;
+  if (g_lag_comp > 200) g_lag_comp = 200;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -981,6 +993,25 @@ static void __cdecl on_camera_updated(void) {
 
   g_frames++;
 
+  // Calls per second, re-estimated every second. GetTickCount is coarse per frame but exact over a
+  // second, and it keeps the trailing compensation in SECONDS whatever the client's frame rate is.
+  // (No QueryPerformanceCounter: 64-bit division needs the CRT this plugin does not link.)
+  {
+    DWORD now = GetTickCount();
+
+    if (!g_rate_tick0)
+      g_rate_tick0 = now;
+    g_rate_frames++;
+    if (now - g_rate_tick0 >= 1000) {
+      float fr = (float)g_rate_frames * 1000.0f / (float)(int)(now - g_rate_tick0);
+
+      if (fr > 5.0f && fr < 400.0f)
+        g_frame_rate = fr;
+      g_rate_tick0 = now;
+      g_rate_frames = 0;
+    }
+  }
+
   // Pick up a changed widescreen.cfg while the game is running, so toggling the launcher's
   // checkbox takes effect without restarting the client -- or reinstalling anything.
   if ((g_frames % RSC_CONFIG_POLL) == 0 && config_changed()) {
@@ -1062,6 +1093,13 @@ static void __cdecl on_camera_updated(void) {
 
     g_target_move = f_sqrt(mx * mx + my * my + mz * mz);
     g_warped = g_have_prev_target && (g_target_move > WARP_UNITS);
+    if (g_have_prev_target && !g_warped && g_target_move < LEAD_MOVE_CAP) {
+      g_move_x += (mx - g_move_x) * 0.5f;
+      g_move_z += (mz - g_move_z) * 0.5f;
+    } else {
+      g_move_x = 0.0f;                   // a warp or knockback must never throw the camera
+      g_move_z = 0.0f;
+    }
     g_prev_target = *live_tgt;
     g_have_prev_target = 1;
   }
@@ -1477,9 +1515,40 @@ static void __cdecl on_camera_updated(void) {
     *(float*)(cam + OFF_LERP_SOURCE) = g_last_lerp;
   }
 
-  src->x = anchor.x + nx;
-  src->y = anchor.y + ny;
-  src->z = anchor.z + nz;
+  // ⭐ Lead the commanded eye by how far the real one is about to trail.
+  //
+  // The client eases camera_source toward this point a fraction per frame, so against a moving character
+  // the eye always settles behind where we put it -- further out when the character runs away from the
+  // camera, closer when it runs toward it. With the radius pinned to the zoom level, that trailing is the
+  // whole of the "zooms out slightly when I start moving" reported from play.
+  // 📏 One 201s capture on the zoom-radius build, holding (stick idle) while moving, distance minus the
+  // standing distance against speed away from the eye:
+  //     -60..-40 u/s  -11.4     -40..-20  -7.1     -20..0  -4.0     0..20  +1.8     20..40  +11.1     40..60  +13.2
+  // A straight line through that is 0.279 s x speed (typical running 33-48 u/s). Leading by speed x 0.279 s
+  // along the movement cancels it at steady speed, in either direction.
+  //
+  // ⚠ Added to the WRITTEN point only, never to g_eye: g_eye is next frame's angle reference, and a lead
+  // folded into it would skew the held angle a little more every frame. Scaled by the pivot blend, so it
+  // exists only while we orbit the character, and zeroed on warps and knockbacks (see g_move_x).
+  {
+    float lead_x = 0.0f, lead_z = 0.0f;
+
+    if (g_orbit_hold && g_lag_comp > 0 && g_anchor_blend > 0.0f) {
+      float k = g_frame_rate * LAG_SECONDS * ((float)g_lag_comp / 100.0f) * g_anchor_blend;
+      float len;
+
+      lead_x = g_move_x * k;
+      lead_z = g_move_z * k;
+      len = f_sqrt(lead_x * lead_x + lead_z * lead_z);
+      if (len > LEAD_MAX) {
+        lead_x *= LEAD_MAX / len;
+        lead_z *= LEAD_MAX / len;
+      }
+    }
+    src->x = anchor.x + nx + lead_x;
+    src->y = anchor.y + ny;
+    src->z = anchor.z + nz + lead_z;
+  }
 
   // ⭐ While steering, put the EYE there too, not just the point we want it to head for.
   //
@@ -1601,13 +1670,13 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
-            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold,
+            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {

@@ -647,6 +647,21 @@ separately and is worth re-checking against this before relying on the old compa
 
 `camera_state` itself holds no field that depends on the zoom alone — its distances all move with the camera.
 
+### 📏 How far the camera trails a moving character (2026-09-14)
+
+With the desired eye pinned at a fixed radius around the character, the real eye (`camera_source`, eased toward
+the desired point every frame) settles off that radius in proportion to how fast the character moves along the
+eye direction. One 201 s capture, stick idle, character moving:
+
+| speed away from the eye (u/s) | −60..−40 | −40..−20 | −20..0 | 0..20 | 20..40 | 40..60 |
+|---|---|---|---|---|---|---|
+| distance − standing distance | −11.4 | −7.1 | −4.0 | +1.8 | +11.1 | +13.2 |
+
+A line through it: **0.279 s × speed** (R² 0.45; typical running 33–48 u/s). That is ~3.4× what the `+0x1BC` source
+lerp alone (0.289/frame) would give at 30 fps, so the look-at lerp and our own pivot easing contribute too — measure
+the combined figure rather than deriving it from one lerp. The camera plugin cancels it by leading the desired
+point along the movement by speed × 0.279 s (`RightStickLagCompensation`).
+
 ⛔ **This rules zoom out as the cause of the post-release "rubber band"** — at Zoom 2 we sit at 50.3
 against their 45.4, and 4.9 units cannot produce a 12× difference in settling tail.
 
