@@ -791,6 +791,31 @@ Where the right stick lives is **settled**: the client's own Pad Button Config s
 `Right Analog Left/Right = PAD Z Axis` and `Right Analog Forward/Backward = PAD Z Rotate`, matching
 the axes observed moving. Base PSO has the bindings; it just never drives a camera with them.
 
+### Input context — "a menu has the pad" (`0x009FF3D4`)
+
+A **byte**: which binding set the pad is driving. **`1` = gameplay.** It is written by `0x00791748(context)`,
+which stores the byte and, when a pad-config object exists (`0x00A9CCCC`) and the context is not 1,
+rebuilds the action masks at `0x00A9CB50` via `0x0078EEA8`. That setter has over a hundred callers across
+the UI, overwhelmingly `push 0` as a window opens and `push 1` as it closes; a few pass 3–6.
+
+📏 **Found 2026-09-13 by labelled whole-data snapshots** (every writable section, one snapshot per state):
+the only clean byte that read `1` in all four play samples (standing, running) and not `1` in all five menu
+samples (Start menu twice, item pack, shop counter, Pad Button Config). Then traced live:
+
+| state | value |
+|---|---|
+| running, turning, fights, taking hits (≈5 min across two traces) | `1` throughout |
+| Start menu, NPC/shop counter, chat, gate and teleporter dialogs | `0` |
+| loading screens | `1` — covered separately by the camera's attachment pointer |
+| Y (Action Palette Top) pressed | `0` for ~3s; held: `7` for ~4.5s — what that UI is, unconfirmed |
+
+⚠ **`0x00A21CCC` looked just as clean in the snapshots and is a trap.** It is the **IME lock** (`0` open,
+`1` locked; see the `stImeOpen:ime is not locked` assert at `0x008410DE` and the `ImmSetOpenStatus` calls
+beside it), with `0x00ADC948` its request mode. It flipped for 5 seconds with no menu up.
+
+Used by the right-stick camera to treat the pad as released while a menu has it
+(`RightStickYieldToMenus`), which is also what lets the Right Analog rows stay live bindings.
+
 ## Structures (protocol side, from newserv — reliable)
 
 - `PlayerInventory` = `{u8 num_items, u8 hp_from_materials, u8 tp_from_materials, Language, item[30]}`,

@@ -51,45 +51,20 @@
 #define ADDR_UPDATE_CALL    0x004D3B12   // `call 0x004D1FF4` inside UpdateDefaultNPCCameraState
 #define ADDR_SET_POINTS     0x004D1FF4   // set_global_camera_source_and_target(camera behaviour obj)
 #define ADDR_CAMERA_STATE   0x00A48A54   // -> camera_state_struct*, 0x1D4 bytes
-// Pad Button Config menu. The row loop's common tail runs once per row for all 16 rows, with the
-// row index in EBX and that row's text widget in ECX, AFTER the row's value label has been written:
+// ⭐ The client's INPUT CONTEXT: which binding set the pad is driving. 1 = gameplay. Every window that
+// takes the pad switches it through 0x00791748(context) -- over a hundred call sites, `push 0` when a
+// window opens and `push 1` when it closes -- so it is the client's own statement that a menu has the
+// controls. That is the moment the right stick belongs to the menu rather than the camera, which is also
+// how Ephinea behaves.
 //
-//   00790D9A  mov ecx, [edi+0x2C]      ; the row's text widget
-//   00790D9D  call 0x0072E0E4          ; <- retargeted; we overwrite rows 2 and 3 first
-//   00790DA8  cmp ebx, 0x10            ; 16 rows
-//
-// Hooking the shared tail rather than either label branch means one call site instead of two, and it
-// does not matter which branch (axis names at 0x0097B264, button names at 0x0097B2E4) produced the
-// text -- we simply replace it afterwards.
-#define ADDR_PADROW_CALL    0x00790D9D   // `call 0x0072E0E4` -- the per-row tail
-#define ADDR_TEXT_SPACE     0x0072E0E4   // __thiscall(ecx = widget), what that call went to
-#define ADDR_TEXT_SETTEXT   0x0072DB60   // __thiscall(ecx = widget, wchar_t*, int) -- CALLEE cleans
-
-// Which rows are the right analog axes. Row order is the menu's own: 0 Move L/R, 1 Move F/B,
-// 2 Right Analog L/R, 3 Right Analog F/B, then the buttons. Confirmed against the in-game screen.
-// Greying a row out, using the client's OWN mechanism rather than an invented one.
-// ChatShortcutMenuYesNoWindow_SetItemColorById @ 0x00738A9C is how the client disables a menu entry:
-//
-//   *(u32*)(item + 0x24) = 0xFF909090;   // grey
-//   *(u16*)(item + 4)   &= 0xFFFE;       // clear bit 0
-//
-// Both halves are corroborated by ListWindowObject_AddListItem @ 0x00735C90, which initialises
-// +0x24 to 0xFFFFFFFF (so +0x24 is the colour) and sets bit 0 of the same flags word when the
-// caller passes has_cursor (so bit 0 is the cursor/selectable bit).
-//
-// We replicate it inline rather than calling 0x00738A9C, because that function also requires bit 2
-// of the flags word to be set and it is not known whether the pad config's rows have it -- a
-// precondition that fails silently is worse than three field writes.
-#define LIST_LINES_PTR      0x28         // list window -> array of line objects
-#define LIST_NUM_LINES      0x8A         // short
-#define ITEM_FLAGS          0x04         // ushort; bit 0 = has cursor / selectable
-#define ITEM_VALUE          0x18         // the item_index passed to AddListItem
-#define ITEM_COLOR          0x24         // ARGB, 0xFFFFFFFF when added
-#define ITEM_GREY           0xFF909090   // the client's own disabled grey
-#define OFF_MENU_LIST       0x24         // menu object -> the 16-row list window
-
-#define PAD_ROW_RSTICK_X    2
-#define PAD_ROW_RSTICK_Y    3
+// 📏 Found 2026-09-13 by labelled whole-data-section snapshots: the one clean byte that read 1 in all four
+// play samples (standing, running) and something else in all five menu samples (Start menu, item pack,
+// shop counter, Pad Button Config). A 7-minute trace then held 1 through running, turning, fights and
+// hits, and dropped to 0 for the Start menu, NPC counters, chat, and the gate/teleporter dialogs.
+// ⚠ 0x00A21CCC looked just as clean in the snapshots and is NOT this: it is the IME lock (note the
+// "stImeOpen:ime is not locked" assert at 0x008410DE), and it flipped for 5s with no menu up.
+#define ADDR_INPUT_CONTEXT  0x009FF3D4   // byte
+#define INPUT_CONTEXT_PLAY  1
 
 #define ADDR_MENU_FLAGS     0x00A489FC   // g_GenericMenuSubSelection
 
@@ -302,6 +277,8 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 static int g_attach_guard = 1;           // RightStickRequireAttachedCamera
 // Off switch for the focused-camera yield below, in case some state zeroes the look-at lerp during play.
 static int g_focus_guard = 1;            // RightStickYieldToFocusCamera
+// Off switch for the menu yield: while a menu has the pad, the right stick is navigating it.
+static int g_menu_guard = 1;             // RightStickYieldToMenus
 // ⭐ Hold the camera's distance steady while steering AND moving. See the note at the distance block.
 #define STEER_HOLD_MOVE     0.5f         // look-at units/frame counted as moving; running measures ~1.5
 static int   g_steer_hold = 1;           // RightStickSteerHoldDistance
@@ -635,6 +612,7 @@ static void load_config(void) {
   g_suppress    = cfg_int(buf, got, "RightStickSuppressMask", g_suppress);
   g_attach_guard = cfg_int(buf, got, "RightStickRequireAttachedCamera", g_attach_guard) ? 1 : 0;
   g_focus_guard  = cfg_int(buf, got, "RightStickYieldToFocusCamera", g_focus_guard) ? 1 : 0;
+  g_menu_guard   = cfg_int(buf, got, "RightStickYieldToMenus", g_menu_guard) ? 1 : 0;
   g_steer_hold   = cfg_int(buf, got, "RightStickSteerHoldDistance", g_steer_hold) ? 1 : 0;
   g_orbit_live   = cfg_int(buf, got, "RightStickOrbitCharacter", g_orbit_live) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
@@ -952,92 +930,6 @@ static void resume_camera(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Pad Button Config: show the right analog rows as taken, while the camera owns them
-//
-// While the camera owns the right stick, the two Right Analog rows are greyed out, lose their
-// cursor, and report what has taken them. Whatever they are bound to is not reaching the game, so
-// showing them as live bindings is a lie.
-//
-// The greying is the client's OWN mechanism, not an invented one -- see ITEM_COLOR/ITEM_FLAGS above.
-//
-// Nothing is written to the character's key config. The bindings are left exactly as the player set
-// them, which matters because on Blue Burst that config syncs to the server: clearing it would
-// persist after the camera was switched off again.
-// ---------------------------------------------------------------------------
-static const wchar_t RSC_ROW_TEXT[] = L"-- Camera --";
-
-// Safe to hand the client a static string: its own callers pass static globals here (the axis and
-// button name tables at 0x0097B264 / 0x0097B2E4), so this setter cannot be taking ownership.
-static void pad_row_set_text(void* widget, const wchar_t* text) {
-  __asm {
-    push 0x20
-    push text
-    mov  ecx, widget
-    mov  eax, ADDR_TEXT_SETTEXT
-    call eax                                             // ret 8: callee cleans both arguments
-  }
-}
-
-// Grey a text object and take its cursor away, exactly as 0x00738A9C does.
-static void grey_item(BYTE* item) {
-  if (!item)
-    return;
-  *(DWORD*)(item + ITEM_COLOR) = ITEM_GREY;
-  *(WORD*)(item + ITEM_FLAGS) = (WORD)(*(WORD*)(item + ITEM_FLAGS) & 0xFFFE);
-}
-
-// The left-hand column is a list item, found by the value AddListItem was given -- which for this
-// menu is the row index.
-static void grey_list_row(BYTE* list, int value) {
-  BYTE** lines;
-  int n, i;
-
-  if (!list)
-    return;
-  lines = *(BYTE***)(list + LIST_LINES_PTR);
-  n = (int)*(short*)(list + LIST_NUM_LINES);
-  if (!lines || n <= 0 || n > 256)
-    return;                              // not the shape we expect: do nothing rather than scribble
-  for (i = 0; i < n; i++) {
-    BYTE* item = lines[i];
-    if (item && *(int*)(item + ITEM_VALUE) == value)
-      grey_item(item);
-  }
-}
-
-static void __cdecl on_pad_row(void* widget, int row, void* menu) {
-  if (!g_enabled || !widget)
-    return;                              // classic controls: leave the menu exactly as it was
-  if (row != PAD_ROW_RSTICK_X && row != PAD_ROW_RSTICK_Y)
-    return;
-
-  // Right-hand column: say what has taken the binding, and grey it.
-  pad_row_set_text(widget, RSC_ROW_TEXT);
-  grey_item((BYTE*)widget);
-
-  // Left-hand column: grey the row name and drop its cursor, so it reads as unavailable and the
-  // selection no longer highlights it.
-  if (menu)
-    grey_list_row(*(BYTE**)((BYTE*)menu + OFF_MENU_LIST), row);
-}
-
-// Replaces `call 0x0072E0E4`. ECX is the row's text widget and EBX the row index; both survive
-// pushad/popad, and the original is tail-jumped so its ret lands after our call site.
-void __declspec(naked) padRowHook(void) {
-  __asm {
-    pushad
-    push esi                                             // the menu object (rows are esi+row*4+0x2C)
-    push ebx                                             // row index
-    push ecx                                             // this row's text widget
-    call on_pad_row
-    add  esp, 0xC
-    popad
-    mov  eax, ADDR_TEXT_SPACE
-    jmp  eax
-  }
-}
-
-// ---------------------------------------------------------------------------
 // The hook body
 //
 // Runs immediately after the auto-camera has written desired_source and desired_target, and before
@@ -1085,6 +977,16 @@ static void __cdecl on_camera_updated(void) {
   // and counts down the rescan backoff -- so calling it a second time just for the log would make
   // diagnostic builds behave differently from release ones.
   have_pad = read_pad(&pad);
+
+  // ⭐ A menu has the pad, so the right stick is navigating it. Treat the WHOLE pad as released -- sticks,
+  // triggers and buttons -- so the camera does exactly what it does when nobody touches it, and a
+  // trigger pressed to page through a menu cannot fire a recentre. It is also why the Right Analog rows
+  // in Pad Button Config are left alone: inside a menu they are what the stick does.
+  if (have_pad && g_menu_guard && *(BYTE*)ADDR_INPUT_CONTEXT != INPUT_CONTEXT_PLAY) {
+    pad.rx = pad.ry = pad.lx = pad.ly = 0.0f;
+    pad.buttons = 0;
+    pad.lt = pad.rt = 0;
+  }
 
   // Recentre on the PRESS, not every frame the control is held: holding it would otherwise pin the
   // offset at zero and make the stick appear dead.
@@ -1139,11 +1041,11 @@ static void __cdecl on_camera_updated(void) {
     // likely to be visible in those three than in our offset.
     float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
     rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
-             "menuflags=%08X | holding=%d yaw=%d/1000 pitch=%d/1000 | "
+             "menuflags=%08X ctx=%d | holding=%d yaw=%d/1000 pitch=%d/1000 | "
              "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d",
              g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
              f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
-             flags, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
+             flags, *(BYTE*)ADDR_INPUT_CONTEXT, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
              f_toint(g_pitch_offset * 1000.0f),
              f_toint(f_atan2(ax, az) * 1000.0f), f_toint(f_sqrt(ax * ax + az * az)), f_toint(ay),
              f_toint(g_target_move * 100.0f),
@@ -1603,32 +1505,6 @@ void __declspec(naked) cameraHook(void) {
 // No VirtualProtect: this client's .text is already RWX, which is why no other plugin in this repo
 // unprotects either. If that ever changes, every plugin here breaks together and loudly.
 // ---------------------------------------------------------------------------
-// Separate from the camera patch on purpose: this one is cosmetic, and a guard failure here must
-// not cost the actual feature.
-static BOOL patch_pad_menu(void) {
-  DWORD target;
-
-  // mov ecx, [edi+0x2C] -- the widget load immediately before the call we are replacing.
-  if (*(BYTE*)(ADDR_PADROW_CALL - 3) != 0x8B ||
-      *(BYTE*)(ADDR_PADROW_CALL - 2) != 0x4F ||
-      *(BYTE*)(ADDR_PADROW_CALL - 1) != 0x2C)
-    return FALSE;
-  // cmp ebx, 0x10 -- the 16-row loop bound, 11 bytes past the call. Confirms this is the row loop
-  // and not some other site that happens to load a widget the same way.
-  if (*(BYTE*)(ADDR_PADROW_CALL + 11) != 0x83 ||
-      *(BYTE*)(ADDR_PADROW_CALL + 12) != 0xFB ||
-      *(BYTE*)(ADDR_PADROW_CALL + 13) != 0x10)
-    return FALSE;
-  if (*(BYTE*)ADDR_PADROW_CALL != 0xE8)
-    return FALSE;
-  target = (DWORD)(ADDR_PADROW_CALL + 5 + *(LONG*)(ADDR_PADROW_CALL + 1));
-  if (target != ADDR_TEXT_SPACE)
-    return FALSE;
-
-  *(DWORD*)(ADDR_PADROW_CALL + 1) = calc_disp32(ADDR_PADROW_CALL + 1, (ULONG_PTR)padRowHook);
-  return TRUE;
-}
-
 static BOOL patch_camera(void) {
   DWORD target;
 
@@ -1663,20 +1539,16 @@ __declspec(dllexport) void __stdcall load(void) {
   // be changeable at runtime; it checks g_enabled every frame and returns immediately when off,
   // which costs a compare and leaves the client's camera untouched. Skipping the patch here would
   // make turning the feature on require a client restart.
-  if (!patch_pad_menu())
-    rsc_log("pad menu NOT patched: row-loop signature did not match at %08X "
-            "(right analog rows will still show their bindings)", ADDR_PADROW_CALL);
-
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
-            g_recentre_mask, g_suppress,
+            g_recentre_mask, g_suppress, g_menu_guard,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
