@@ -307,6 +307,9 @@ static int g_focus_guard = 1;            // RightStickYieldToFocusCamera
 static int   g_steer_hold = 1;           // RightStickSteerHoldDistance
 static float g_steer_hold_h = 0.0f;      // the distance held for this steering stretch
 static int   g_steer_hold_valid = 0;     // seeded on the first steering+moving frame, cleared the frame either stops
+// ⭐ While steering, orbit the CHARACTER rather than the chase camera's look-ahead point. See the eye block.
+static int   g_orbit_live = 1;           // RightStickOrbitCharacter
+static float g_anchor_blend = 0.0f;      // 0 = desired look-at (client geometry), 1 = live look-at (the character)
 #define DEFAULT_ATTACH_FRAMES 10         // ~0.3s before we believe the camera has nothing to follow
 static int g_attach_frames = DEFAULT_ATTACH_FRAMES;  // RightStickAttachedFrames
 static int g_detached = 0;               // consecutive frames with no attached object
@@ -633,6 +636,7 @@ static void load_config(void) {
   g_attach_guard = cfg_int(buf, got, "RightStickRequireAttachedCamera", g_attach_guard) ? 1 : 0;
   g_focus_guard  = cfg_int(buf, got, "RightStickYieldToFocusCamera", g_focus_guard) ? 1 : 0;
   g_steer_hold   = cfg_int(buf, got, "RightStickSteerHoldDistance", g_steer_hold) ? 1 : 0;
+  g_orbit_live   = cfg_int(buf, got, "RightStickOrbitCharacter", g_orbit_live) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -934,6 +938,7 @@ static void engage_camera(float auto_yaw, float h, float vy) {
 static void release_camera(void) {
   g_have_yaw = 0;
   g_pitch_offset = 0.0f;
+  g_anchor_blend = 0.0f;                 // a resume starts from the client's geometry, never a stale blend
   // ⚠ g_yaw_seeded deliberately survives. A release is not always permanent: the suppress mask
   // fires on transient client camera events, and getting hit is one of them. See resume_camera.
 }
@@ -1043,6 +1048,7 @@ static void __cdecl on_camera_updated(void) {
   DWORD flags = *(DWORD*)ADDR_MENU_FLAGS;
   vec3f* src;
   vec3f* tgt;
+  vec3f anchor;                          // what the eye orbits this frame -- see the note above the eye block
   float vx, vy, vz, h, r;
   float nx, nz, ny;
   pad_state pad;
@@ -1353,10 +1359,36 @@ static void __cdecl on_camera_updated(void) {
   // Distance and height are the client's business. We hold the ANGLE and nothing else -- the same
   // division that made stick rotation work. Do not reintroduce a distance of our own.
 
+  // ⭐ ORBIT THE CHARACTER, not the chase camera's look-ahead point, while steering.
+  //
+  // 📏 The client aims its DESIRED look-at ahead of a running character: desired minus live look-at, over
+  // 1741 struct samples, measured +30.9 units along the running direction (1.9 across) while running,
+  // +4.5 walking, 0 standing. Building the eye around that point meant spinning the camera around a
+  // runner swung the eye's distance to the CHARACTER with the angle -- a clean cosine, actual/commanded
+  // 1.05 with the camera ahead of the runner down to 0.78 behind -- and that cycling was the residual
+  // "weirdness while rotating and running" left after the distance hold (step p90 4.4 vs 0.6 idle).
+  // Ordinary running keeps the camera behind, so the offset is constant there and nothing pumps.
+  //
+  // So while steering, pivot on the LIVE look-at -- the character -- as the snap eye-write below
+  // already does. The view still looks ahead: the client keeps smoothing camera_target toward its own
+  // desired target; only the point the eye orbits changes. Eased over g_snap_frames both ways, because
+  // switching the pivot in one frame would move the eye by up to the whole look-ahead distance.
   {
-    float ex = g_eye.x - tgt->x;
-    float ez = g_eye.z - tgt->z;
-    float ey = g_eye.y - tgt->y;
+    vec3f* live = (vec3f*)(cam + OFF_TARGET);
+    float step = 1.0f / (float)g_snap_frames;
+
+    g_anchor_blend += (g_orbit_live && g_steering) ? step : -step;
+    if (g_anchor_blend > 1.0f) g_anchor_blend = 1.0f;
+    if (g_anchor_blend < 0.0f) g_anchor_blend = 0.0f;
+    anchor.x = tgt->x + (live->x - tgt->x) * g_anchor_blend;
+    anchor.y = tgt->y + (live->y - tgt->y) * g_anchor_blend;
+    anchor.z = tgt->z + (live->z - tgt->z) * g_anchor_blend;
+  }
+
+  {
+    float ex = g_eye.x - anchor.x;
+    float ez = g_eye.z - anchor.z;
+    float ey = g_eye.y - anchor.y;
     float elen = f_sqrt(ex * ex + ez * ez);
     // ⭐ h, the chase camera's CURRENT preferred distance -- not a value of our own.
     //
@@ -1429,9 +1461,9 @@ static void __cdecl on_camera_updated(void) {
     // holding: letting it follow keeps the character correctly framed vertically on slopes.
     ey = g_freeze_chase ? g_hold_y : vy;
 
-    g_eye.x = tgt->x + ex;
-    g_eye.y = tgt->y + ey;
-    g_eye.z = tgt->z + ez;
+    g_eye.x = anchor.x + ex;
+    g_eye.y = anchor.y + ey;
+    g_eye.z = anchor.z + ez;
     nx = ex; ny = ey; nz = ez;
   }
 
@@ -1448,7 +1480,7 @@ static void __cdecl on_camera_updated(void) {
       if (nh2 > 0.0f && f_abs(ny2) <= PITCH_SIN_LIMIT * rr) {
         float k = nh2 / hh2;
         nx *= k; nz *= k; ny = ny2;
-        g_eye.x = tgt->x + nx; g_eye.y = tgt->y + ny; g_eye.z = tgt->z + nz;
+        g_eye.x = anchor.x + nx; g_eye.y = anchor.y + ny; g_eye.z = anchor.z + nz;
       }
     }
   }
@@ -1470,9 +1502,9 @@ static void __cdecl on_camera_updated(void) {
     *(float*)(cam + OFF_LERP_SOURCE) = g_last_lerp;
   }
 
-  src->x = tgt->x + nx;
-  src->y = tgt->y + ny;
-  src->z = tgt->z + nz;
+  src->x = anchor.x + nx;
+  src->y = anchor.y + ny;
+  src->z = anchor.z + nz;
 
   // ⭐ While steering, put the EYE there too, not just the point we want it to head for.
   //
