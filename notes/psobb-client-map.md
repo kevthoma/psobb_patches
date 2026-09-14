@@ -625,6 +625,28 @@ assumption that the level numbers were incomparable was wrong.)
 
 Height rises with distance (−1.7 → 20.2), so zoom is a pitch-preserving arc, not a pure dolly.
 
+### ⭐ Where the zoom level lives (found 2026-09-13)
+
+Labelled snapshots at every zoom level (globals, the camera state struct and the active controller), with
+one taken while running:
+
+| | Zoom 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| active controller `+0xE4` (float) | 25.00 | 45.42 | 53.60 | 61.80 | 70.00 |
+| active controller `+0xE0` (float, meaning unknown) | 18.00 | 25.43 | 26.90 | 28.40 | 30.00 |
+| global `0x009ACEDC` (u32, zoom index) | 0 | 1 | 2 | 3 | 4 |
+
+Controller = `[0x00A48A00 + byte[0x00A489F4]*4]`, the same one whose `+0x38` mode bits the camera plugin
+already reads. `+0xE4` is **exactly Ephinea's `CameraZoom1..5` defaults**, and it did not change while running.
+
+⚠ **This corrects the table above.** The measured settled distance is `+0xE4` **plus a constant ~4.9** at every
+level. So the "~4.9 units closer" is not Ephinea shifting the ladder: both clients configure the same distances,
+and 4.9 is how far past the configured distance our camera settles, at least as `camtrace` measures it
+(horizontal eye → live look-at). Whether Ephinea settles at the configured value or also 4.9 beyond was measured
+separately and is worth re-checking against this before relying on the old comparison.
+
+`camera_state` itself holds no field that depends on the zoom alone — its distances all move with the camera.
+
 ⛔ **This rules zoom out as the cause of the post-release "rubber band"** — at Zoom 2 we sit at 50.3
 against their 45.4, and 4.9 units cannot produce a 12× difference in settling tail.
 

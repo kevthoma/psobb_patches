@@ -114,6 +114,15 @@
 #define ADDR_CAM_CTRL_ARRAY 0x00A48A00   // controller* [4]
 #define OFF_CTRL_MODE       0x38
 #define CTRL_MODE_SMOOTHED  0x0C         // either lerp bit set = the client is smoothing = ordinary play
+// ⭐ The ZOOM LEVEL's configured distance, a float in the active controller -- stable while running.
+//
+// 📏 Labelled snapshots at every zoom level, 2026-09-13 (the only controller field that depended on the zoom
+// alone and was unchanged while running): 25.00 / 45.42 / 53.60 / 61.80 / 70.00 -- exactly Ephinea's
+// CameraZoom1..5 defaults. The settled horizontal eye distance measured earlier is that plus a constant
+// ~4.9 at every level (30.0 / 50.3 / 58.5 / 66.6 / 75.0), which is what ZOOM_REST_OFFSET restores.
+// (The zoom INDEX, 0..4, is also a global at 0x009ACEDC; the distance is the more useful of the two.)
+#define OFF_CTRL_ZOOM_DIST  0xE4
+#define ZOOM_REST_OFFSET    4.9f
 #define OFF_ATTACH          0x090        // object pointer; NULL whenever there is no character
 // (+0x084 and +0x1C4 are two more object pointers. They are null on the MENU camera but still live
 // on ship select and the loading screen, so they do not separate those -- see below.)
@@ -933,6 +942,25 @@ static void resume_camera(void) {
   g_eye_valid = 0;                       // re-seeded from the client's own eye next frame
 }
 
+// The horizontal distance the camera settles at, standing still, for the player's zoom level -- read from
+// the active controller rather than inferred from the camera, because the camera's own distance is not a
+// fixed target while running (see the anchor block). 0 when it cannot be read or looks wrong.
+static float zoom_rest_distance(void) {
+  BYTE idx = *(BYTE*)ADDR_CAM_CTRL_INDEX;
+  DWORD ctl;
+  float z;
+
+  if (idx >= 4)
+    return 0.0f;
+  ctl = *(DWORD*)(ADDR_CAM_CTRL_ARRAY + (DWORD)idx * 4);
+  if (!ctl)
+    return 0.0f;
+  z = *(float*)(ctl + OFF_CTRL_ZOOM_DIST);
+  if (!(z > 5.0f && z < 500.0f))         // also rejects NaN
+    return 0.0f;
+  return z + ZOOM_REST_OFFSET;
+}
+
 // ---------------------------------------------------------------------------
 // The hook body
 //
@@ -1047,14 +1075,15 @@ static void __cdecl on_camera_updated(void) {
     float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
     rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
              "menuflags=%08X ctx=%d menu=%d | holding=%d yaw=%d/1000 pitch=%d/1000 | "
-             "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d",
+             "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d zoomrest=%d",
              g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
              f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
              flags, *(BYTE*)ADDR_INPUT_CONTEXT, *(DWORD*)ADDR_MENU_VIEW, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
              f_toint(g_pitch_offset * 1000.0f),
              f_toint(f_atan2(ax, az) * 1000.0f), f_toint(f_sqrt(ax * ax + az * az)), f_toint(ay),
              f_toint(g_target_move * 100.0f),
-             (g_freeze_chase && g_have_yaw) ? 1 : 0, f_toint(g_hold_h), f_toint(g_hold_y));
+             (g_freeze_chase && g_have_yaw) ? 1 : 0, f_toint(g_hold_h), f_toint(g_hold_y),
+             f_toint(zoom_rest_distance()));
   }
 #endif
 
@@ -1338,6 +1367,22 @@ static void __cdecl on_camera_updated(void) {
     float use_h = h;
     float near_d, far_d;
     float want = wrap_angle(g_camera_yaw - ((elen > 0.0f) ? f_atan2(ex, ez) : g_camera_yaw));
+
+    // ⭐ Pivoting on the character needs a radius measured from the character -- and h is not one.
+    //
+    // h is the client's distance from its LOOK-AHEAD point, and it is not a fixed target: when the character
+    // starts running the look-ahead jumps ~31 units out and h grows with it. Orbiting the character at h is
+    // what the first cut of RightStickOrbitWhileHolding did, and it traded the zoom-in for a zoom-out.
+    // 📏 One 300s capture on that build: running with the camera behind, median 70.8 (51% of the time over
+    // 70), and 6 of 9 movement starts pushed the camera out by more than 20 units (median +31.9) -- against
+    // a standing distance of 50.0 at Zoom 2. So the radius is the ZOOM's own resting distance instead, eased
+    // in with the pivot. The eye still trails a runner through the client's own lerp, as it always did.
+    if (g_orbit_hold) {
+      float zr = zoom_rest_distance();
+
+      if (zr > 0.0f)
+        use_h = h + (zr - h) * g_anchor_blend;
+    }
 
     if (g_steer_hold && g_steering && g_target_move > STEER_HOLD_MOVE) {
       if (!g_steer_hold_valid) {
