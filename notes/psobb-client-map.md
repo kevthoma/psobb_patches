@@ -791,30 +791,42 @@ Where the right stick lives is **settled**: the client's own Pad Button Config s
 `Right Analog Left/Right = PAD Z Axis` and `Right Analog Forward/Backward = PAD Z Rotate`, matching
 the axes observed moving. Base PSO has the bindings; it just never drives a camera with them.
 
-### Input context — "a menu has the pad" (`0x009FF3D4`)
+### Main menu view state — "the Start menu is up" (`0x00A97F44`)
 
-A **byte**: which binding set the pad is driving. **`1` = gameplay.** It is written by `0x00791748(context)`,
-which stores the byte and, when a pad-config object exists (`0x00A9CCCC`) and the context is not 1,
-rebuilds the action masks at `0x00A9CB50` via `0x0078EEA8`. That setter has over a hundred callers across
-the UI, overwhelmingly `push 0` as a window opens and `push 1` as it closes; a few pass 3–6.
+A **dword**, recomputed every frame by the code at `0x00709B27`: **`1`** when `0x00716BA0([0x00A9C4F4])`
+reports the main menu, else **`2`** when `0x00718E88([0x00A9C4F4])` does (a second panel state, not yet seen in
+play), else **`0`**. A change starts the slide that moves the 3D view aside — `0x00A97F2C` 960 → 1140,
+`0x00A98498` 480 → 240 — which is why it separates the Start menu from every other window.
 
-📏 **Found 2026-09-13 by labelled whole-data snapshots** (every writable section, one snapshot per state):
-the only clean byte that read `1` in all four play samples (standing, running) and not `1` in all five menu
-samples (Start menu twice, item pack, shop counter, Pad Button Config). Then traced live:
+📏 **Two labelled whole-data snapshot sets, 2026-09-13** (every writable section, one snapshot per state):
 
-| state | value |
-|---|---|
-| running, turning, fights, taking hits (≈5 min across two traces) | `1` throughout |
-| Start menu, NPC/shop counter, chat, gate and teleporter dialogs | `0` |
-| loading screens | `1` — covered separately by the camera's attachment pointer |
-| Y (Action Palette Top) pressed | `0` for ~3s; held: `7` for ~4.5s — what that UI is, unconfirmed |
+| state | `0x00A97F44` | `0x009FF3D4` (input context) |
+|---|---|---|
+| play: standing, running | `0` | `1` |
+| Start menu, item pack, Pad Button Config | **`1`** | `0` |
+| chat menu (Y) | `0` | `7` |
+| Quick menu (R+Y) | `0` | `0` |
+| shop counter | `0` | `0` |
 
-⚠ **`0x00A21CCC` looked just as clean in the snapshots and is a trap.** It is the **IME lock** (`0` open,
-`1` locked; see the `stImeOpen:ime is not locked` assert at `0x008410DE` and the `ImmSetOpenStatus` calls
-beside it), with `0x00ADC948` its request mode. It flipped for 5 seconds with no menu up.
+Used by the right-stick camera (`RightStickYieldToMenus`): while it is non-zero the pad is treated as released,
+so the right stick navigates the menu, as on Ephinea, and the Right Analog rows stay live bindings. Chat and
+the Quick menu keep camera control on purpose.
 
-Used by the right-stick camera to treat the pad as released while a menu has it
-(`RightStickYieldToMenus`), which is also what lets the Right Analog rows stay live bindings.
+### Input context (`0x009FF3D4`) — looks like a menu flag, is not one
+
+A **byte**: which binding set the pad is driving, **`1` = gameplay**. Written by `0x00791748(context)`, which
+stores it and, when a pad-config object exists (`0x00A9CCCC`) and the context is not 1, rebuilds the action
+masks at `0x00A9CB50` via `0x0078EEA8`. Over a hundred UI callers, mostly `push 0` as a window opens and
+`push 1` as it closes; a few pass 3–6.
+
+It was the first candidate — the only clean byte across the first snapshot set, `1` through ≈5 minutes of
+running, fights and hits, `0` for the Start menu, counters, chat and gate dialogs. ⚠ **But every window that
+takes the pad switches it**, so it cannot tell the Start menu from the Quick menu (both `0`). Useful for
+"some window has the pad", not for "the Start menu is up".
+
+⚠ **`0x00A21CCC` looked just as clean in the first snapshots and is a trap.** It is the **IME lock** (`0` open,
+`1` locked; see the `stImeOpen:ime is not locked` assert at `0x008410DE` and the `ImmSetOpenStatus` calls beside
+it), with `0x00ADC948` its request mode. It flipped for 5 seconds with no menu up.
 
 ## Structures (protocol side, from newserv — reliable)
 

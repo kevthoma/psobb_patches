@@ -51,20 +51,21 @@
 #define ADDR_UPDATE_CALL    0x004D3B12   // `call 0x004D1FF4` inside UpdateDefaultNPCCameraState
 #define ADDR_SET_POINTS     0x004D1FF4   // set_global_camera_source_and_target(camera behaviour obj)
 #define ADDR_CAMERA_STATE   0x00A48A54   // -> camera_state_struct*, 0x1D4 bytes
-// ⭐ The client's INPUT CONTEXT: which binding set the pad is driving. 1 = gameplay. Every window that
-// takes the pad switches it through 0x00791748(context) -- over a hundred call sites, `push 0` when a
-// window opens and `push 1` when it closes -- so it is the client's own statement that a menu has the
-// controls. That is the moment the right stick belongs to the menu rather than the camera, which is also
-// how Ephinea behaves.
+// ⭐ The MAIN MENU's view state: 0 = no panel, 1 while the Start menu -- or anything opened from it, such
+// as the item pack or Pad Button Config -- has the screen, 2 for a second panel state not yet seen in
+// play. Recomputed every frame by the code at 0x00709B27: 1 when 0x00716BA0([0x00A9C4F4]) reports it,
+// else 2 when 0x00718E88 does, else 0. A change starts the slide that moves the 3D view aside
+// (0x00A97F2C 960 -> 1140, 0x00A98498 480 -> 240), so this is the client's own "the menu has the screen".
 //
-// 📏 Found 2026-09-13 by labelled whole-data-section snapshots: the one clean byte that read 1 in all four
-// play samples (standing, running) and something else in all five menu samples (Start menu, item pack,
-// shop counter, Pad Button Config). A 7-minute trace then held 1 through running, turning, fights and
-// hits, and dropped to 0 for the Start menu, NPC counters, chat, and the gate/teleporter dialogs.
-// ⚠ 0x00A21CCC looked just as clean in the snapshots and is NOT this: it is the IME lock (note the
-// "stImeOpen:ime is not locked" assert at 0x008410DE), and it flipped for 5s with no menu up.
-#define ADDR_INPUT_CONTEXT  0x009FF3D4   // byte
-#define INPUT_CONTEXT_PLAY  1
+// 📏 Two labelled snapshot sets, 2026-09-13: 1 in all four Start-menu samples, the item pack and Pad Button
+// Config; 0 in play (standing, running), the chat menu, the Quick menu (R+Y) and a shop counter. The chat
+// and Quick menus reading 0 is the point -- camera control stays live in both, as it does on Ephinea.
+//
+// ⚠ NOT the input context byte (0x009FF3D4). That looked right first -- 1 in play, 0 in the Start menu --
+// but EVERY window that takes the pad switches it: the Quick menu reads 0 exactly like the Start menu, and
+// chat reads 7. And NOT 0x00A21CCC, the IME lock, which flipped for 5s with no menu up.
+#define ADDR_MENU_VIEW      0x00A97F44   // dword
+#define ADDR_INPUT_CONTEXT  0x009FF3D4   // byte -- logged in diagnostic builds only, see above
 
 #define ADDR_MENU_FLAGS     0x00A489FC   // g_GenericMenuSubSelection
 
@@ -277,7 +278,7 @@ static int g_suppress    = DEFAULT_SUPPRESS;
 static int g_attach_guard = 1;           // RightStickRequireAttachedCamera
 // Off switch for the focused-camera yield below, in case some state zeroes the look-at lerp during play.
 static int g_focus_guard = 1;            // RightStickYieldToFocusCamera
-// Off switch for the menu yield: while a menu has the pad, the right stick is navigating it.
+// Off switch for the menu yield: while the Start menu is up, the right stick is navigating it.
 static int g_menu_guard = 1;             // RightStickYieldToMenus
 // ⭐ Hold the camera's distance steady while steering AND moving. See the note at the distance block.
 #define STEER_HOLD_MOVE     0.5f         // look-at units/frame counted as moving; running measures ~1.5
@@ -978,11 +979,12 @@ static void __cdecl on_camera_updated(void) {
   // diagnostic builds behave differently from release ones.
   have_pad = read_pad(&pad);
 
-  // ⭐ A menu has the pad, so the right stick is navigating it. Treat the WHOLE pad as released -- sticks,
-  // triggers and buttons -- so the camera does exactly what it does when nobody touches it, and a
-  // trigger pressed to page through a menu cannot fire a recentre. It is also why the Right Analog rows
-  // in Pad Button Config are left alone: inside a menu they are what the stick does.
-  if (have_pad && g_menu_guard && *(BYTE*)ADDR_INPUT_CONTEXT != INPUT_CONTEXT_PLAY) {
+  // ⭐ The Start menu is up, so the right stick is navigating it. Treat the WHOLE pad as released --
+  // sticks, triggers and buttons -- so the camera does exactly what it does when nobody touches it, and a
+  // trigger pressed to page through the menu cannot fire a recentre. It is also why the Right Analog rows
+  // in Pad Button Config are left alone: inside the menu they are what the stick does. The chat and Quick
+  // menus deliberately do not count -- see ADDR_MENU_VIEW.
+  if (have_pad && g_menu_guard && *(DWORD*)ADDR_MENU_VIEW != 0) {
     pad.rx = pad.ry = pad.lx = pad.ly = 0.0f;
     pad.buttons = 0;
     pad.lt = pad.rt = 0;
@@ -1041,11 +1043,11 @@ static void __cdecl on_camera_updated(void) {
     // likely to be visible in those three than in our offset.
     float ax = src->x - tgt->x, ay = src->y - tgt->y, az = src->z - tgt->z;
     rsc_diag("slot=%d conn=%d rx=%d/1000 ry=%d/1000 move=%d/1000 btn=%04X lt=%d rt=%d | "
-             "menuflags=%08X ctx=%d | holding=%d yaw=%d/1000 pitch=%d/1000 | "
+             "menuflags=%08X ctx=%d menu=%d | holding=%d yaw=%d/1000 pitch=%d/1000 | "
              "auto: yaw=%d/1000 dist=%d height=%d tgtspeed=%d | frozen=%d held h=%d y=%d",
              g_xi_user, have_pad, f_toint(pad.rx * 1000.0f), f_toint(pad.ry * 1000.0f),
              f_toint(move_magnitude(&pad) * 1000.0f), pad.buttons, pad.lt, pad.rt,
-             flags, *(BYTE*)ADDR_INPUT_CONTEXT, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
+             flags, *(BYTE*)ADDR_INPUT_CONTEXT, *(DWORD*)ADDR_MENU_VIEW, g_have_yaw, f_toint(g_camera_yaw * 1000.0f),
              f_toint(g_pitch_offset * 1000.0f),
              f_toint(f_atan2(ax, az) * 1000.0f), f_toint(f_sqrt(ax * ax + az * az)), f_toint(ay),
              f_toint(g_target_move * 100.0f),
