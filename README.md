@@ -93,28 +93,29 @@ Settings live in `widescreen.cfg`:
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
+| `RightStickClientPadFallback` | `1` | When XInput reports no pad, read the sticks from the client's own decoded pad instead. This is what makes the camera work on a DualSense and other DirectInput-only controllers, which XInput cannot see at all. Sticks, buttons and the L2/R2 triggers, so the recentre control works here too — but `RightStickRecentreMask` then takes the **client's** bits, not XInput's. `0` = XInput only. |
 
-### ⛔ Known issue: PS5 (DualSense) controllers
+### PS5 (DualSense) controllers — reproduced and fixed 2026-09-28
 
-**Reported from play 2026-09-10; not yet reproduced, no DualSense on hand.** The right stick does not
-drive the camera correctly on a PS5 pad. The exact failure is not characterised yet -- "not handling it
-properly" could be no response at all, wrong axes, or a stuck axis.
+**The camera never engaged on a DualSense, because the pad is invisible to XInput.** Measured with one
+connected: `XInputGetState` reports `ERROR_DEVICE_NOT_CONNECTED` for all four slots while the game plays
+with that very pad, and the legacy joystick API sees it as Sony `054C:0CE6`. It is a DirectInput device,
+so the plugin's XInput reads could never see it, whatever the plugin did.
 
-Leading hypothesis: **the plugin reads XInput directly**, and a DualSense in its native mode is not an
-XInput device. `XInputGetState` would simply never see it, so the camera would never engage. Xidi ships
-with our builds and presents an XInput pad *to the game's DirectInput*, which is why the client itself
-works with such a pad -- but that does not make the physical controller an XInput device for our own
-reads. Steam Input or DS4Windows would mask this by presenting the pad as an Xbox 360 controller, so
-whether it works may depend on how the player launched the game.
+**The fix reads the sticks from the client itself.** PSOBB decodes every pad it supports into its own
+record, so using that covers DualSense and any other DirectInput controller at once. XInput stays the
+primary source, so Xbox-style pads keep the behaviour they were tuned with; the client's record is used
+only when XInput reports no pad. `RightStickClientPadFallback=0` restores XInput-only behaviour.
 
-⚠ The obvious fallback is barred: `g_joyState` is the Pad Config screen's binding-capture buffer, not
-gameplay input, and it freezes at its last value when that screen closes. A DirectInput path would need
-its own device enumeration.
+**The recentre control works there too.** The same record carries the buttons, so L2 and R2 are mapped
+onto the trigger fields and `RightStickRecentreTrigger` keeps its usual meaning. ⚠ `RightStickRecentreMask`
+is the exception: on this path the bits are the **client's**, not XInput's — known ones are `0x0010` L1,
+`0x0020` R1, `0x0040` L2, `0x0080` R2.
 
-**To diagnose, no hardware needed on our side:** a DualSense player runs the diagnostic build and sends
-`corellia_rightstickcamera.log`. The startup line reports whether `XInputGetState` resolved, and each
-sampled line carries `slot=`, `conn=` and the raw `rx=`/`ry=` values. `conn=0` confirms the hypothesis
-outright; live `rx`/`ry` that move the camera wrongly points somewhere else entirely.
+Two older notes this corrects: Xidi presenting an XInput pad *to the game's DirectInput* never made the
+physical controller an XInput device for our own reads, and a fallback did **not** need its own
+DirectInput enumeration — the client had already decoded the pad. (`g_joyState` remains a dead end: it is
+the Pad Config capture buffer and freezes when that screen closes.)
 
 **Vertical look is off by default.** It works and is clamped, but stacked on the chase camera's own
 pitch the two end up solving for height at the same time and it reads oddly in play. Set
