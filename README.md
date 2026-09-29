@@ -107,6 +107,15 @@ record, so using that covers DualSense and any other DirectInput controller at o
 primary source, so Xbox-style pads keep the behaviour they were tuned with; the client's record is used
 only when XInput reports no pad. `RightStickClientPadFallback=0` restores XInput-only behaviour.
 
+⚠ **If the camera spins on its own, or menus scroll by themselves, check your Right Analog bindings.**
+Blue Burst stores the pad config **per character, on the server**, so one character can have Right Analog
+bound to axes the pad never drives while another is fine with the same controller. The client then reads
+those axes as permanently pegged: its own menus scroll (that happens with or without this plugin) and the
+camera follows the stuck values. Set **Right Analog Left/Right = `PAD Z Axis`** and **Right Analog
+Forward/Backward = `PAD Z Rotate`** in Options → Pad Button Config. The plugin also guards against this:
+it will not use the client's pad until it has seen the sticks at rest at least once, so a stuck axis gives
+a camera that does nothing rather than one that spins, and says so in the log.
+
 **The recentre control works there too.** The same record carries the buttons, so L2 and R2 are mapped
 onto the trigger fields and `RightStickRecentreTrigger` keeps its usual meaning. ⚠ `RightStickRecentreMask`
 is the exception: on this path the bits are the **client's**, not XInput's — known ones are `0x0010` L1,
