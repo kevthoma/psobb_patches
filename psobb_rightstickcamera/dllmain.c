@@ -186,6 +186,31 @@
 #define XI_OFF_THUMB_RY     14
 #define XI_TRIGGER_ON       30           // XINPUT_GAMEPAD_TRIGGER_THRESHOLD
 
+// ⭐ THE CLIENT'S OWN DECODED PAD -- what makes the camera work on controllers XInput cannot see.
+//
+// 📏 Found 2026-09-28 with a DualSense connected (corellia-build#8). Facts, all measured in game:
+//   - XInput reports NOTHING in all four slots while the pad is connected and the game plays fine
+//     (ERROR_DEVICE_NOT_CONNECTED), so `XInputGetState` can never drive the camera for it. The legacy
+//     joystick API sees the same pad as Sony 054C:0CE6 -- it is a DirectInput device, not an XInput one.
+//   - The client decodes it anyway, into 0x50-byte records at 0x00AAE770 indexed by the local pad. The
+//     index comes from 0x006DC358, which in our build is literally `xor eax, eax; ret` -- always record 0.
+//   - Layout, confirmed by moving one stick at a time: +0/+2 left stick X/Y, +4/+6 right stick X/Y, both
+//     int16 resting at exactly 0 and reaching +-120 at full deflection (the client applies its own
+//     deadzone). +8 and +C hold each stick's direction as an angle.
+//   - Live and independent: moving one stick leaves the other at 0, values track every frame and return
+//     to 0 on release.
+//
+// ⛔ NOT g_joyState (0x00ADCC80). That is the Pad Config screen's binding-capture buffer, which freezes at
+// its last value when that screen closes -- a frozen axis is indistinguishable from a held stick.
+//
+// ⚠ Y is inverted relative to XInput: full up reads -119 here, while XInput's thumb Y is positive up.
+#define ADDR_PAD_RECORD     0x00AAE770
+#define PAD_OFF_LX          0x00
+#define PAD_OFF_LY          0x02
+#define PAD_OFF_RX          0x04
+#define PAD_OFF_RY          0x06
+#define PAD_CLIENT_FULL     120.0f       // measured full deflection
+
 // Bits of g_GenericMenuSubSelection that mean "leave the camera alone".
 //
 // 0x820 is the mask the camera update itself tests to skip collision and smoothing entirely, so it
@@ -488,6 +513,10 @@ typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD dwUserIndex, void* pState);
 static PFN_XInputGetState g_xinput_get_state = NULL;
 static int   g_xi_user   = -1;           // the connected slot, or -1 if not known
 static DWORD g_xi_rescan = 0;            // frames left before scanning slots again
+// Fall back to the client's own decoded pad when XInput sees nothing -- DualSense and other DirectInput
+// pads. 0 restores the XInput-only behaviour.
+static int   g_client_pad = 1;           // RightStickClientPadFallback
+static int   g_client_pad_logged = 0;    // log the hand-over once, not every frame
 
 // Accumulated offset from wherever the auto-camera would have put the eye. Persisted only in
 // memory: a camera angle is not worth a file, and starting each session centred is the behaviour
@@ -640,6 +669,7 @@ static void load_config(void) {
   g_lag_comp     = cfg_int(buf, got, "RightStickLagCompensation", g_lag_comp);
   if (g_lag_comp < 0) g_lag_comp = 0;
   if (g_lag_comp > 200) g_lag_comp = 200;
+  g_client_pad   = cfg_int(buf, got, "RightStickClientPadFallback", g_client_pad) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -830,6 +860,40 @@ static void decode_pad(const BYTE* st, pad_state* p) {
   p->rt      = st[XI_OFF_TRIGGER_R];
 }
 
+// The client's own decoded sticks, for pads XInput cannot see. Axes only: the buttons and triggers in
+// pad_state stay zero, so the trigger recentre is unavailable on such a pad until those are mapped too.
+static int read_pad_client(pad_state* p) {
+  short lx = *(short*)(ADDR_PAD_RECORD + PAD_OFF_LX);
+  short ly = *(short*)(ADDR_PAD_RECORD + PAD_OFF_LY);
+  short rx = *(short*)(ADDR_PAD_RECORD + PAD_OFF_RX);
+  short ry = *(short*)(ADDR_PAD_RECORD + PAD_OFF_RY);
+
+  if (!g_client_pad)
+    return 0;
+
+  p->rx = (float)rx / PAD_CLIENT_FULL;
+  p->ry = -(float)ry / PAD_CLIENT_FULL;   // the client's Y is positive DOWN; XInput's is positive up
+  p->lx = (float)lx / PAD_CLIENT_FULL;
+  p->ly = -(float)ly / PAD_CLIENT_FULL;
+  if (p->rx > 1.0f) p->rx = 1.0f;
+  if (p->rx < -1.0f) p->rx = -1.0f;
+  if (p->ry > 1.0f) p->ry = 1.0f;
+  if (p->ry < -1.0f) p->ry = -1.0f;
+  if (p->lx > 1.0f) p->lx = 1.0f;
+  if (p->lx < -1.0f) p->lx = -1.0f;
+  if (p->ly > 1.0f) p->ly = 1.0f;
+  if (p->ly < -1.0f) p->ly = -1.0f;
+
+  // Only interesting once, and only when it actually carries input: a silent fallback is what made the
+  // DualSense report so hard to diagnose in the first place.
+  if (!g_client_pad_logged && (rx || ry || lx || ly)) {
+    g_client_pad_logged = 1;
+    rsc_log("client pad: XInput sees no pad, using the client's own sticks (rx=%d ry=%d of %d)",
+            (int)rx, (int)ry, (int)PAD_CLIENT_FULL);
+  }
+  return 1;
+}
+
 static int read_pad(pad_state* p) {
   BYTE st[XI_STATE_BYTES];
   DWORD i;
@@ -838,7 +902,7 @@ static int read_pad(pad_state* p) {
   p->buttons = 0;
   p->lt = p->rt = 0;
   if (!g_xinput_get_state)
-    return 0;
+    return read_pad_client(p);
 
   // Fast path: the slot we already know about.
   if (g_xi_user >= 0) {
@@ -852,7 +916,7 @@ static int read_pad(pad_state* p) {
   // Scanning every frame is wasteful when nothing is plugged in, so back off between sweeps.
   if (g_xi_rescan) {
     g_xi_rescan--;
-    return 0;
+    return read_pad_client(p);           // an XInput-less pad must not wait out the backoff
   }
   for (i = 0; i < XI_MAX_USERS; i++) {
     if (g_xinput_get_state(i, st) == ERROR_SUCCESS) {
@@ -862,7 +926,7 @@ static int read_pad(pad_state* p) {
     }
   }
   g_xi_rescan = XI_RESCAN_FRAMES;
-  return 0;
+  return read_pad_client(p);
 }
 
 // How hard the LEFT stick is pushed, 0..1, deadzone removed. This is the "is the player moving"
@@ -1670,13 +1734,13 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% clientpad=%d "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
-            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp,
+            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp, g_client_pad,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {

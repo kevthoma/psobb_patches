@@ -796,15 +796,35 @@ purpose is presenting an XInput pad to this DirectInput game, so the physical co
 device by construction. Load `XInputGetState` dynamically (`xinput1_4` → `1_3` → `9_1_0`); a static
 import refuses to start the client on a machine without that exact DLL.
 
-⛔ **That "by construction" claim is too strong, and a PS5 pad appears to break it (2026-09-10).**
-Xidi presents an XInput pad **to the game's DirectInput** -- it does not make the physical controller an
-XInput device for OUR reads. A DualSense in native mode is not an XInput device, so `XInputGetState`
-would never see it and the camera would never engage. Reported from play, not yet reproduced (no
-hardware on hand). Steam Input or DS4Windows would mask it by presenting the pad as an Xbox 360
-controller, which may be why it works for some players and not others.
+⛔ **That "by construction" claim is wrong, and a PS5 pad proved it (measured 2026-09-28).**
+Xidi presents an XInput pad **to the game's DirectInput** — it does not make the physical controller an
+XInput device for OUR reads. With a DualSense connected and the game playing fine with it,
+`XInputGetState` returned `ERROR_DEVICE_NOT_CONNECTED` for all four slots, while the legacy joystick API
+saw the same pad as Sony `054C:0CE6`. Steam Input or DS4Windows mask this by presenting an Xbox 360 pad,
+which is why it works for some players and not others.
 
-⚠ A DirectInput fallback cannot reuse `g_joyState` -- see below, it is the Pad Config capture buffer
-and freezes when that screen closes. It would need its own device enumeration.
+### ⭐ The client's own decoded pad — `0x00AAE770` (found 2026-09-28)
+
+**The answer to "how do we read a pad XInput cannot see": the client has already decoded it.** Records of
+**0x50 bytes** at `0x00AAE770`, indexed by the local pad — and the index function `0x006DC358` is literally
+`xor eax, eax; ret` in our build, so it is always **record 0**.
+
+| offset | field |
+|---|---|
+| `+0x00` / `+0x02` | left stick X / Y, `int16` |
+| `+0x04` / `+0x06` | right stick X / Y, `int16` |
+| `+0x08`, `+0x0C` | each stick's direction as a PSO angle |
+
+📏 Measured by moving one stick at a time with a DualSense: both pairs rest at exactly **0** (the client
+applies its own deadzone), reach **±120** at full deflection, update every frame, and are independent.
+⚠ **Y is positive DOWN here**, the opposite of XInput's thumb Y. Readers index it as `[reg*8]` with the
+register pre-multiplied by 10 — that is where the 0x50 stride comes from, e.g. `0x004F3C03`, `0x004D7C2C`.
+
+Used by the camera plugin as `RightStickClientPadFallback`, only when XInput reports no pad. Buttons and
+triggers are not mapped from it yet, so the trigger recentre stays XInput-only.
+
+⚠ It is NOT `g_joyState` — that remains the Pad Config capture buffer, frozen once that screen closes.
+A DirectInput fallback with its own device enumeration turned out to be unnecessary.
 
 ⚠ And note the axis convention differs between the two APIs. DirectInput here delivers **unsigned
 `0..65535` centred at ~32768** (PSOBB never calls `SetProperty(DIPROP_RANGE)`, so axes arrive in the
