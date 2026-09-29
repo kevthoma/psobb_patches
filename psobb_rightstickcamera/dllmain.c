@@ -526,6 +526,21 @@ static DWORD g_xi_rescan = 0;            // frames left before scanning slots ag
 // pads. 0 restores the XInput-only behaviour.
 static int   g_client_pad = 1;           // RightStickClientPadFallback
 static int   g_client_pad_logged = 0;    // log the hand-over once, not every frame
+// ⭐ Arming. The record is only trusted once it has been seen AT REST.
+//
+// 📏 Found the hard way 2026-09-28, in production, seconds after shipping the fallback: with a
+// DualSense connected, that install's client read the right stick pegged at (120, -119) forever with
+// hands off the pad -- so the camera span continuously and the client's own menus scrolled. Xidi
+// "only handles WIRED / DONGLE XInput controllers", and with no XInput pad it can still hand the game
+// a DirectInput device whose axes sit at 0, which the client decodes as full deflection. Which device
+// the client picks varies: canary rested at 0 with the very same pad.
+//
+// A real pad rests within a moment of loading; a phantom one never does. So: read the record, but do
+// not act on it until it has been at rest once. That makes the failure mode "camera does nothing",
+// which is exactly what these players had before the fallback existed.
+#define PAD_CLIENT_REST     8            // |axis| at or below this counts as resting
+static int   g_client_pad_armed = 0;
+static int   g_client_pad_stuck_logged = 0;
 
 // Accumulated offset from wherever the auto-camera would have put the eye. Persisted only in
 // memory: a camera angle is not worth a file, and starting each session centred is the behaviour
@@ -879,6 +894,23 @@ static int read_pad_client(pad_state* p) {
 
   if (!g_client_pad)
     return 0;
+
+  if (!g_client_pad_armed) {
+    if (rx > -PAD_CLIENT_REST && rx < PAD_CLIENT_REST &&
+        ry > -PAD_CLIENT_REST && ry < PAD_CLIENT_REST &&
+        lx > -PAD_CLIENT_REST && lx < PAD_CLIENT_REST &&
+        ly > -PAD_CLIENT_REST && ly < PAD_CLIENT_REST) {
+      g_client_pad_armed = 1;
+    } else {
+      // Say so once. A silent refusal here would look exactly like the bug it is protecting against.
+      if (!g_client_pad_stuck_logged && g_frames > 300) {
+        g_client_pad_stuck_logged = 1;
+        rsc_log("client pad: never at rest (L=%d,%d R=%d,%d) -- not used; the client is reading a "
+                "stuck or phantom device", (int)lx, (int)ly, (int)rx, (int)ry);
+      }
+      return 0;
+    }
+  }
 
   p->rx = (float)rx / PAD_CLIENT_FULL;
   p->ry = -(float)ry / PAD_CLIENT_FULL;   // the client's Y is positive DOWN; XInput's is positive up
