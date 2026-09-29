@@ -210,6 +210,15 @@
 #define PAD_OFF_RX          0x04
 #define PAD_OFF_RY          0x06
 #define PAD_CLIENT_FULL     120.0f       // measured full deflection
+// Buttons live in the same record: +0x34 is what is HELD, +0x38 what was pressed THIS FRAME, and
+// +0x30/+0x32 are auto-repeat counters that climb while a button is down.
+// 📏 Bits identified 2026-09-28 by pressing one button at a time on a DualSense:
+//     0x0010 L1    0x0020 R1    0x0040 L2    0x0080 R2    0x0002 / 0x0004 face buttons
+// ⚠ These are the CLIENT's bits, not XInput's wButtons -- a RightStickRecentreMask written for one
+// does not mean the same thing on the other.
+#define PAD_OFF_BUTTONS     0x34
+#define PAD_BTN_L2          0x0040
+#define PAD_BTN_R2          0x0080
 
 // Bits of g_GenericMenuSubSelection that mean "leave the camera alone".
 //
@@ -860,8 +869,8 @@ static void decode_pad(const BYTE* st, pad_state* p) {
   p->rt      = st[XI_OFF_TRIGGER_R];
 }
 
-// The client's own decoded sticks, for pads XInput cannot see. Axes only: the buttons and triggers in
-// pad_state stay zero, so the trigger recentre is unavailable on such a pad until those are mapped too.
+// The client's own decoded pad, for controllers XInput cannot see. Sticks, buttons, and L2/R2 mapped
+// onto the trigger fields so the recentre control works here exactly as it does on an XInput pad.
 static int read_pad_client(pad_state* p) {
   short lx = *(short*)(ADDR_PAD_RECORD + PAD_OFF_LX);
   short ly = *(short*)(ADDR_PAD_RECORD + PAD_OFF_LY);
@@ -883,6 +892,17 @@ static int read_pad_client(pad_state* p) {
   if (p->lx < -1.0f) p->lx = -1.0f;
   if (p->ly > 1.0f) p->ly = 1.0f;
   if (p->ly < -1.0f) p->ly = -1.0f;
+
+  // L2/R2 become the trigger fields, so RightStickRecentreTrigger keeps its documented meaning on a
+  // pad XInput cannot see. The raw held mask is passed through for RightStickRecentreMask -- in the
+  // client's own bit numbering, which is why the defines above spell the known bits out.
+  {
+    WORD held = *(WORD*)(ADDR_PAD_RECORD + PAD_OFF_BUTTONS);
+
+    p->buttons = held;
+    p->lt = (BYTE)((held & PAD_BTN_L2) ? 255 : 0);
+    p->rt = (BYTE)((held & PAD_BTN_R2) ? 255 : 0);
+  }
 
   // Only interesting once, and only when it actually carries input: a silent fallback is what made the
   // DualSense report so hard to diagnose in the first place.

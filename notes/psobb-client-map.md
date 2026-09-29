@@ -814,6 +814,12 @@ which is why it works for some players and not others.
 | `+0x00` / `+0x02` | left stick X / Y, `int16` |
 | `+0x04` / `+0x06` | right stick X / Y, `int16` |
 | `+0x08`, `+0x0C` | each stick's direction as a PSO angle |
+| `+0x30` / `+0x32` | auto-repeat counters, climbing while a button is held |
+| `+0x34` | buttons HELD, bitmask |
+| `+0x38` | buttons pressed THIS FRAME |
+
+📏 Button bits, one press at a time on a DualSense: `0x0010` L1, `0x0020` R1, `0x0040` L2, `0x0080` R2,
+`0x0002` / `0x0004` face buttons. ⚠ The client's own numbering — not XInput's `wButtons`.
 
 📏 Measured by moving one stick at a time with a DualSense: both pairs rest at exactly **0** (the client
 applies its own deadzone), reach **±120** at full deflection, update every frame, and are independent.
