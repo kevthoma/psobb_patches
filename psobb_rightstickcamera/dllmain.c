@@ -237,6 +237,12 @@
 #define HB_FLAG_PASSABLE    0x100        // set = the client lets the player through, so we let the eye through
 #define DOOR_HALF_HEIGHT    50.0f        // the client's own fixed box height
 #define DOOR_MARGIN         6.0f         // stop the eye this far in front of the panel
+// ⚠ Never pull the eye all the way in. 📏 First build did, and standing against a fence collapsed the
+// commanded distance to 0.3-1.1 units with the stick hard over: the eye sat on the character, so there
+// was nothing to orbit and it read as the camera FREEZING mid-turn (reported from play, confirmed in
+// the frame telemetry). Below this floor, let the panel clip instead -- which is what the client's own
+// camera does against walls.
+#define DOOR_MIN_DIST       18.0f
 #define DOOR_CULL           700.0f       // ignore objects further than this from the character
 #define DOOR_MAX_ENTITIES   512
 
@@ -1814,13 +1820,17 @@ static void __cdecl on_camera_updated(void) {
       float clear = door_clear_fraction(&anchor, anchor.x + nx + lead_x, anchor.y + ny, anchor.z + nz + lead_z);
 
       if (clear < 1.0f) {
-        float len = f_sqrt((nx + lead_x) * (nx + lead_x) + (nz + lead_z) * (nz + lead_z));
-        float keep = (len > 0.0f) ? (clear - DOOR_MARGIN / len) : clear;
+        float want = f_sqrt((nx + lead_x) * (nx + lead_x) + (nz + lead_z) * (nz + lead_z));
+        float allowed = clear * want - DOOR_MARGIN;
 
-        if (keep < 0.0f)
-          keep = 0.0f;
-        nx *= keep; ny *= keep; nz *= keep;
-        lead_x *= keep; lead_z *= keep;
+        if (allowed < DOOR_MIN_DIST)
+          allowed = DOOR_MIN_DIST;       // a camera sitting on the character cannot rotate at all
+        if (want > 0.0f && allowed < want) {
+          float k = allowed / want;
+
+          nx *= k; ny *= k; nz *= k;
+          lead_x *= k; lead_z *= k;
+        }
       }
     }
 
