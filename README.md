@@ -93,6 +93,7 @@ Settings live in `widescreen.cfg`:
 | `RightStickRecentreTrigger` | `1` | Which trigger recentres: `0` none, `1` LT, `2` RT, `3` either. |
 | `RightStickRecentreMask` | `0` | Raw XInput button bitmask that also recentres, if a trigger is not what you want. |
 | `RightStickSuppressMask` | `0x820` | Menu-state bits that mean "leave the camera alone". |
+| `RightStickDoorCollision` | `1` | Stop the camera at doors and laser fences. The game's own camera collision only tests the level's fixed geometry, so panels are invisible to it; this tests the line from you to the camera against the same solid shapes that stop your **character**, which means an open door releases the camera automatically. Map objects only, so enemies never block it, and the camera is never pulled closer than 18 units. |
 | `RightStickClientPadFallback` | `1` | When XInput reports no pad, read the sticks from the client's own decoded pad instead. This is what makes the camera work on a DualSense and other DirectInput-only controllers, which XInput cannot see at all. Sticks, buttons and the L2/R2 triggers, so the recentre control works here too — but `RightStickRecentreMask` then takes the **client's** bits, not XInput's. `0` = XInput only. |
 
 ### PS5 (DualSense) controllers — reproduced and fixed 2026-09-28
