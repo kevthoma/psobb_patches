@@ -243,6 +243,23 @@
 // the frame telemetry). Below this floor, let the panel clip instead -- which is what the client's own
 // camera does against walls.
 #define DOOR_MIN_DIST       18.0f
+
+// ⭐ Walls: the client HAS an eye-vs-wall clamp, and skips it in exactly the case we create.
+//
+// 0x004D3BA8, which runs AFTER this hook, sweeps the last clamped eye (+0x1C8) to the commanded
+// source (+0x1A0) and records in +0x174 whether that path hit anything; 0x004D3D6C then pulls the
+// eye onto the surface it hit -- but ONLY when that flag is set. Rotating the eye sideways ourselves
+// never touches the swept path, so a turn that sweeps the eye THROUGH a wall leaves the flag clear,
+// the clamp is skipped, and the eye is left inside the geometry. Reported from play as the camera
+// clipping and snapping and "completely breaks wall collision in the hospital area": a wide outdoor
+// map almost never has geometry beside the orbit, a small room has it on every side.
+//
+// ⚠ Setting +0x174 ourselves does not work -- 0x004D3BA8 recomputes it after us. So mirror
+// 0x004D3D6C instead, on the point we rotate to, using the client's own ray and mask.
+#define ADDR_MAP_RAY        0x0077FFFC   // cast_ray_at_map_collision_geometry(from, to, mask), cdecl
+#define ADDR_MAP_COLLISION  0x00AAB3F0   // the surface list it walks; NULL with no map loaded
+#define MAP_RAY_MASK        0x901        // the mask both of the client's camera callers pass
+#define MAP_HIT_POINT       0x04         // in the record it returns: vec3f* of the hit point
 #define DOOR_CULL           700.0f       // ignore objects further than this from the character
 #define DOOR_MAX_ENTITIES   512
 
@@ -567,6 +584,7 @@ static DWORD g_xi_rescan = 0;            // frames left before scanning slots ag
 // Fall back to the client's own decoded pad when XInput sees nothing -- DualSense and other DirectInput
 // pads. 0 restores the XInput-only behaviour.
 static int   g_door_collision = 1;       // RightStickDoorCollision
+static int   g_wall_collision = 1;       // RightStickWallCollision
 static int   g_door_logged = 0;          // first block only, so the log stays readable
 static int   g_client_pad = 1;           // RightStickClientPadFallback
 static int   g_client_pad_logged = 0;    // log the hand-over once, not every frame
@@ -739,6 +757,7 @@ static void load_config(void) {
   if (g_lag_comp > 200) g_lag_comp = 200;
   g_client_pad   = cfg_int(buf, got, "RightStickClientPadFallback", g_client_pad) ? 1 : 0;
   g_door_collision = cfg_int(buf, got, "RightStickDoorCollision", g_door_collision) ? 1 : 0;
+  g_wall_collision = cfg_int(buf, got, "RightStickWallCollision", g_wall_collision) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -1137,6 +1156,26 @@ static float zoom_rest_distance(void) {
 // How much of the way from the character to the wanted eye position is clear of door and fence panels.
 // 1.0 = nothing in the way. Mirrors the client's own solidity rule (see ADDR_ENTITY_ARRAY above) rather
 // than second-guessing what "open" means for each door class.
+// Mirror of the client's own eye-vs-wall clamp (0x004D3D6C): ray from the look-at to the eye, and on a
+// hit put the eye on the surface. A point with no map loaded, or a clear ray, is left alone.
+static void clamp_eye_to_walls(const vec3f* look, vec3f* eye) {
+  typedef void* (__cdecl *map_ray_fn)(const vec3f*, const vec3f*, int);
+  const float* hit;
+  void* rec;
+
+  if (*(void**)ADDR_MAP_COLLISION == NULL)
+    return;                            // title, loading, character select: nothing to test against
+  rec = ((map_ray_fn)ADDR_MAP_RAY)(look, eye, MAP_RAY_MASK);
+  if (rec == NULL)
+    return;
+  hit = *(const float**)((char*)rec + MAP_HIT_POINT);
+  if (hit == NULL)
+    return;
+  eye->x = hit[0];
+  eye->y = hit[1];
+  eye->z = hit[2];
+}
+
 static float door_clear_fraction(const vec3f* from, float ex, float ey, float ez) {
   float dx = ex - from->x, dy = ey - from->y, dz = ez - from->z;
   float best = 1.0f;
@@ -1884,14 +1923,24 @@ static void __cdecl on_camera_updated(void) {
       float a0 = f_atan2(ex, ez);
       float a1 = f_atan2(nx, nz);
       float a;
+      vec3f want;
 
       g_snap_ramp += 1.0f / (float)g_snap_frames;
       if (g_snap_ramp > 1.0f) g_snap_ramp = 1.0f;
       a = a0 + wrap_angle(a1 - a0) * g_snap_ramp;
 
       // Distance and height stay exactly as the client left them.
-      eye->x = look->x + f_sin(a) * cur_h;
-      eye->z = look->z + f_cos(a) * cur_h;
+      want.x = look->x + f_sin(a) * cur_h;
+      want.y = eye->y;
+      want.z = look->z + f_cos(a) * cur_h;
+
+      // ⭐ ...and then the wall clamp the client is about to skip. See ADDR_MAP_RAY.
+      if (g_wall_collision)
+        clamp_eye_to_walls(look, &want);
+
+      eye->x = want.x;
+      eye->y = want.y;
+      eye->z = want.z;
     }
   } else {
     g_snap_ramp = 0.0f;                  // next engage eases in from wherever the camera has drifted
@@ -1959,13 +2008,13 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% clientpad=%d doors=%d "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% clientpad=%d doors=%d walls=%d "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
-            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp, g_client_pad, g_door_collision,
+            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp, g_client_pad, g_door_collision, g_wall_collision,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
