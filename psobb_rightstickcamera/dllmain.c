@@ -243,6 +243,15 @@
 // the frame telemetry). Below this floor, let the panel clip instead -- which is what the client's own
 // camera does against walls.
 #define DOOR_MIN_DIST       18.0f
+// ⭐ Sliding. 📏 Reported from play: with the floor alone, standing hard against a door kept the distance
+// but left the PANEL BETWEEN the camera and the character -- the player loses sight of themselves, which
+// is worse than the freeze it replaced. A camera cannot be both outside a panel you are touching and far
+// enough away to orbit, so swing it sideways around the character instead, to the nearest angle that can
+// see past the panel, and let it come back as soon as the held angle is clear again.
+#define DOOR_SLIDE_STEP     (8.0f * DEG2RAD)   // angles tried either side
+#define DOOR_SLIDE_TRIES    9                  // up to +-72 degrees
+#define DOOR_SLIDE_EASE     (6.0f * DEG2RAD)   // per frame, so it never snaps
+static float g_door_slide = 0.0f;              // the slide currently applied, radians
 #define DOOR_CULL           700.0f       // ignore objects further than this from the character
 #define DOOR_MAX_ENTITIES   512
 
@@ -1103,6 +1112,7 @@ static void release_camera(void) {
   g_have_yaw = 0;
   g_pitch_offset = 0.0f;
   g_anchor_blend = 0.0f;                 // a resume starts from the client's geometry, never a stale blend
+  g_door_slide = 0.0f;                   // and never with a door slide left over from the last area
   // ⚠ g_yaw_seeded deliberately survives. A release is not always permanent: the suppress mask
   // fires on transient client camera events, and getting hit is one of them. See resume_camera.
 }
@@ -1817,14 +1827,58 @@ static void __cdecl on_camera_updated(void) {
     // ⭐ Doors and fences are invisible to the client's camera ray, so pull the eye in ourselves. Done on
     // the written point only, exactly like the lead above, so nothing here feeds back into the held angle.
     if (g_door_collision) {
-      float clear = door_clear_fraction(&anchor, anchor.x + nx + lead_x, anchor.y + ny, anchor.z + nz + lead_z);
+      float ox = nx + lead_x, oz = nz + lead_z;
+      float target = 0.0f;               // the slide we WANT this frame; 0 = the angle the player asked for
+      float clear;
+      int tried;
 
+      // Judge the held angle first, then angles either side, nearest first, and stop at the first clear
+      // one. Searching from the held angle outward is what makes the camera return to it on its own.
+      clear = door_clear_fraction(&anchor, anchor.x + ox, anchor.y + ny, anchor.z + oz);
+      for (tried = 1; tried <= DOOR_SLIDE_TRIES && clear < 1.0f; tried++) {
+        float a = (float)tried * DOOR_SLIDE_STEP;
+        int side;
+
+        for (side = 0; side < 2; side++) {
+          float t = side ? -a : a;
+          float cs = f_cos(t), sn = f_sin(t);
+          float tx = ox * cs + oz * sn;
+          float tz = -ox * sn + oz * cs;
+
+          if (door_clear_fraction(&anchor, anchor.x + tx, anchor.y + ny, anchor.z + tz) >= 1.0f) {
+            target = t;
+            clear = 1.0f;
+            break;
+          }
+        }
+      }
+
+      // Ease toward it rather than jumping, and keep easing back to 0 once the view opens up.
+      if (g_door_slide < target) {
+        g_door_slide += DOOR_SLIDE_EASE;
+        if (g_door_slide > target) g_door_slide = target;
+      } else if (g_door_slide > target) {
+        g_door_slide -= DOOR_SLIDE_EASE;
+        if (g_door_slide < target) g_door_slide = target;
+      }
+
+      if (g_door_slide != 0.0f) {
+        float cs = f_cos(g_door_slide), sn = f_sin(g_door_slide);
+        float rx2 = ox * cs + oz * sn;
+        float rz2 = -ox * sn + oz * cs;
+
+        lead_x = 0.0f; lead_z = 0.0f;    // the lead is folded into the rotated offset
+        nx = rx2; nz = rz2;
+        ox = rx2; oz = rz2;
+      }
+
+      // Nothing within reach is clear -- fall back to pulling in, but never onto the character.
       if (clear < 1.0f) {
-        float want = f_sqrt((nx + lead_x) * (nx + lead_x) + (nz + lead_z) * (nz + lead_z));
+        float want = f_sqrt(ox * ox + oz * oz);
         float allowed = clear * want - DOOR_MARGIN;
 
         if (allowed < DOOR_MIN_DIST)
-          allowed = DOOR_MIN_DIST;       // a camera sitting on the character cannot rotate at all
+          allowed = DOOR_MIN_DIST;
         if (want > 0.0f && allowed < want) {
           float k = allowed / want;
 
