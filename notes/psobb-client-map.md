@@ -875,6 +875,59 @@ Used by the right-stick camera (`RightStickYieldToMenus`): while it is non-zero 
 so the right stick navigates the menu, as on Ephinea, and the Right Analog rows stay live bindings. Chat and
 the Quick menu keep camera control on purpose.
 
+### ⭐ The camera's wall clamp is CONDITIONAL (2026-10-01)
+
+Two routines in the camera update, both after the `0x004D3B12` hook site:
+
+| what | where | ray |
+|---|---|---|
+| swept check | `0x004D3BA8` | `+0x1C8` (last clamped eye) → `+0x1A0` (commanded source) |
+| eye clamp | `0x004D3D6C` | `+0x184` (look-at) → `+0x178` (eye) |
+
+The swept check stores its result in **`+0x174`**, and `0x004D3D6C` returns immediately unless that flag
+is set. So the client only ever clamps the eye against a wall it was already moving toward.
+
+⚠ That is fine for a camera that only ever trails, and wrong for one that is rotated: a right-stick turn
+sweeps the eye sideways through geometry the commanded path never touched, the flag stays clear, and the
+eye is left inside the wall. 📏 Reported from play 2026-10-01 as clipping and snapping, "completely breaks
+wall collision" in the Pioneer 2 hospital -- a small room has geometry on every side of the orbit, which is
+why wide maps hid it for weeks.
+
+⛔ Writing `+0x174 = 1` from the hook does nothing: `0x004D3BA8` recomputes it afterwards. Mirror
+`0x004D3D6C` instead. `cast_ray_at_map_collision_geometry` (`0x0077FFFC`) is `__cdecl (const vec3f* from,
+const vec3f* to, int mask)`, returns `NULL` or a record whose **`+0x04`** is a `vec3f*` of the hit point
+(`+0x0C..+0x14` of that point struct is the offset the client adds for `+0x1C8`), and it dereferences
+`[0x00AAB3F0]` on entry -- so check that pointer before calling with no map loaded.
+
+### ⭐ Doors and fences: entity hit shapes, not map collision (2026-10-01)
+
+The client's camera ray (`cast_ray_at_map_collision_geometry`, mask `0x901`) walks **map collision surfaces
+only**. 📏 Snapshots of that list with a Forest door and laser fence locked, then after each opened, were
+byte-identical — doors are simply not in it, so no mask change can make the camera see them.
+
+They stop **characters** as entity hit shapes: `IsPlayerAboutToCollide` (`0x00694198`) predicts the next
+position, `CheckPlayerCollisionWithEntities` (`0x007B62A0`) tests it against every non-player entity, and
+`CheckTwoHitboxCollision` (`0x007B5E40`) does the geometry. A hit blocks only when the shape's flags **lack
+`0x100`**.
+
+| what | where |
+|---|---|
+| entity array / count | `0x00AAD720` / `0x00AAE16C` |
+| entity index (objects ≥ `0x4000`) | `+0x1C` word |
+| position / heading | `+0x38` / `+0x60` |
+| hit shapes / count | `+0xA4` / `+0xA8`, stride `0x2C` |
+| shape kind (`1` = oriented box) | `+0x14` |
+| half-depth / half-width / flags / world centre | `+0x0C` / `+0x10` / `+0x18` / `+0x1C` |
+
+⭐ **Mirror the client's own solidity rule rather than learning each door class.** Whatever makes a door
+passable for the player — moved, removed, or reflagged on opening — then releases the camera for free.
+
+⛔ **Do not try to be cleverer than Ephinea here.** Two attempts at the "pressed hard against a panel" case
+both made it worse in play: pulling the eye all the way in collapsed it onto the character so the camera
+appeared to FREEZE, and sliding the eye sideways to a clear angle WOBBLED. 📏 Ephinea simply lets the door
+block the view (observed in their client 2026-10-01), so ours does too: stop at the panel, never closer than
+18 units, and accept that hugging a door hides the character behind it.
+
 ### Input context (`0x009FF3D4`) — looks like a menu flag, is not one
 
 A **byte**: which binding set the pad is driving, **`1` = gameplay**. Written by `0x00791748(context)`, which

@@ -204,6 +204,65 @@
 // its last value when that screen closes -- a frozen axis is indistinguishable from a held stick.
 //
 // ⚠ Y is inverted relative to XInput: full up reads -119 here, while XInput's thumb Y is positive up.
+// ⭐ Doors and laser fences: what the CHARACTER collides with, which is not what the camera's own ray
+// tests. The client's camera ray (`cast_ray_at_map_collision_geometry`, mask 0x901) walks the map's
+// collision surfaces only -- 📏 snapshots of that list with a Forest door and fence locked, then after each
+// opened, were byte-identical, so doors are simply not in it and no mask change can help.
+//
+// They block CHARACTERS as entity hit shapes instead: IsPlayerAboutToCollide (0x00694198) predicts the next
+// position and CheckPlayerCollisionWithEntities (0x007B62A0) tests it against every non-player entity, with
+// CheckTwoHitboxCollision (0x007B5E40) doing the geometry. A hit blocks only when the shape's flags LACK
+// 0x100. Mirroring that same predicate is what makes this correct for free: whatever makes a door passable
+// for the player -- moved, removed, or reflagged on opening -- makes it passable for the camera too.
+//
+// Shapes are NOT all spheres: +0x14 is the shape, 1 meaning an oriented BOX of half-width +0x10, half-depth
+// +0x0C and height +-50, rotated by the entity's heading. 📏 Two Forest doorway panels measured 25x2 and
+// 24x2 with flags 0x10003.
+#define ADDR_ENTITY_ARRAY   0x00AAD720   // base_entity*[], verified in FindEntityById @ 0x007B4D18
+#define ADDR_ENTITY_COUNT   0x00AAE16C
+#define ENT_OFF_INDEX       0x1C         // word; players < 0x1000, enemies/NPCs < 0x4000, map objects above
+#define ENT_OFF_POS         0x38         // vec3f
+#define ENT_OFF_YROT        0x60         // PSO angle units, 0x10000 = full turn
+#define ENT_OFF_HITBOX      0xA4         // collision_box*
+#define ENT_OFF_HITBOX_N    0xA8
+#define ENT_FIRST_OBJECT    0x4000       // doors and fences are map objects; enemies must NOT stop the camera
+#define HB_STRIDE           0x2C
+#define HB_OFF_DEPTH        0x0C         // half-depth (the "radius" field, for shape 1)
+#define HB_OFF_WIDTH        0x10         // half-width
+#define HB_OFF_SHAPE        0x14         // 1 = oriented box
+#define HB_OFF_FLAGS        0x18
+#define HB_OFF_WORLD        0x1C         // vec3f the client rewrites each frame: the shape's world centre
+#define HB_SHAPE_BOX        1
+#define HB_FLAG_ON          0x001        // both shapes need this for the client's own test to consider them
+#define HB_FLAG_PASSABLE    0x100        // set = the client lets the player through, so we let the eye through
+#define DOOR_HALF_HEIGHT    50.0f        // the client's own fixed box height
+#define DOOR_MARGIN         6.0f         // stop the eye this far in front of the panel
+// ⚠ Never pull the eye all the way in. 📏 First build did, and standing against a fence collapsed the
+// commanded distance to 0.3-1.1 units with the stick hard over: the eye sat on the character, so there
+// was nothing to orbit and it read as the camera FREEZING mid-turn (reported from play, confirmed in
+// the frame telemetry). Below this floor, let the panel clip instead -- which is what the client's own
+// camera does against walls.
+#define DOOR_MIN_DIST       18.0f
+
+// ⭐ Walls: the client HAS an eye-vs-wall clamp, and skips it in exactly the case we create.
+//
+// 0x004D3BA8, which runs AFTER this hook, sweeps the last clamped eye (+0x1C8) to the commanded
+// source (+0x1A0) and records in +0x174 whether that path hit anything; 0x004D3D6C then pulls the
+// eye onto the surface it hit -- but ONLY when that flag is set. Rotating the eye sideways ourselves
+// never touches the swept path, so a turn that sweeps the eye THROUGH a wall leaves the flag clear,
+// the clamp is skipped, and the eye is left inside the geometry. Reported from play as the camera
+// clipping and snapping and "completely breaks wall collision in the hospital area": a wide outdoor
+// map almost never has geometry beside the orbit, a small room has it on every side.
+//
+// ⚠ Setting +0x174 ourselves does not work -- 0x004D3BA8 recomputes it after us. So mirror
+// 0x004D3D6C instead, on the point we rotate to, using the client's own ray and mask.
+#define ADDR_MAP_RAY        0x0077FFFC   // cast_ray_at_map_collision_geometry(from, to, mask), cdecl
+#define ADDR_MAP_COLLISION  0x00AAB3F0   // the surface list it walks; NULL with no map loaded
+#define MAP_RAY_MASK        0x901        // the mask both of the client's camera callers pass
+#define MAP_HIT_POINT       0x04         // in the record it returns: vec3f* of the hit point
+#define DOOR_CULL           700.0f       // ignore objects further than this from the character
+#define DOOR_MAX_ENTITIES   512
+
 #define ADDR_PAD_RECORD     0x00AAE770
 #define PAD_OFF_LX          0x00
 #define PAD_OFF_LY          0x02
@@ -524,6 +583,9 @@ static int   g_xi_user   = -1;           // the connected slot, or -1 if not kno
 static DWORD g_xi_rescan = 0;            // frames left before scanning slots again
 // Fall back to the client's own decoded pad when XInput sees nothing -- DualSense and other DirectInput
 // pads. 0 restores the XInput-only behaviour.
+static int   g_door_collision = 1;       // RightStickDoorCollision
+static int   g_wall_collision = 1;       // RightStickWallCollision
+static int   g_door_logged = 0;          // first block only, so the log stays readable
 static int   g_client_pad = 1;           // RightStickClientPadFallback
 static int   g_client_pad_logged = 0;    // log the hand-over once, not every frame
 // ⭐ Arming. The record is only trusted once it has been seen AT REST.
@@ -694,6 +756,8 @@ static void load_config(void) {
   if (g_lag_comp < 0) g_lag_comp = 0;
   if (g_lag_comp > 200) g_lag_comp = 200;
   g_client_pad   = cfg_int(buf, got, "RightStickClientPadFallback", g_client_pad) ? 1 : 0;
+  g_door_collision = cfg_int(buf, got, "RightStickDoorCollision", g_door_collision) ? 1 : 0;
+  g_wall_collision = cfg_int(buf, got, "RightStickWallCollision", g_wall_collision) ? 1 : 0;
   g_attach_frames = cfg_int(buf, got, "RightStickAttachedFrames", g_attach_frames);
   if (g_attach_frames < 1) g_attach_frames = 1;
   if (g_attach_frames > 300) g_attach_frames = 300;
@@ -1087,6 +1151,134 @@ static float zoom_rest_distance(void) {
   if (!(z > 5.0f && z < 500.0f))         // also rejects NaN
     return 0.0f;
   return z + ZOOM_REST_OFFSET;
+}
+
+// How much of the way from the character to the wanted eye position is clear of door and fence panels.
+// 1.0 = nothing in the way. Mirrors the client's own solidity rule (see ADDR_ENTITY_ARRAY above) rather
+// than second-guessing what "open" means for each door class.
+// Mirror of the client's own eye-vs-wall clamp (0x004D3D6C): ray from the look-at to the eye, and on a
+// hit put the eye on the surface. A point with no map loaded, or a clear ray, is left alone.
+static void clamp_eye_to_walls(const vec3f* look, vec3f* eye) {
+  typedef void* (__cdecl *map_ray_fn)(const vec3f*, const vec3f*, int);
+  const float* hit;
+  void* rec;
+
+  if (*(void**)ADDR_MAP_COLLISION == NULL)
+    return;                            // title, loading, character select: nothing to test against
+  rec = ((map_ray_fn)ADDR_MAP_RAY)(look, eye, MAP_RAY_MASK);
+  if (rec == NULL)
+    return;
+  hit = *(const float**)((char*)rec + MAP_HIT_POINT);
+  if (hit == NULL)
+    return;
+  eye->x = hit[0];
+  eye->y = hit[1];
+  eye->z = hit[2];
+}
+
+static float door_clear_fraction(const vec3f* from, float ex, float ey, float ez) {
+  float dx = ex - from->x, dy = ey - from->y, dz = ez - from->z;
+  float best = 1.0f;
+  int count = *(int*)ADDR_ENTITY_COUNT;
+  int i;
+
+  if (count < 0 || count > DOOR_MAX_ENTITIES)
+    return 1.0f;
+
+  for (i = 0; i < count; i++) {
+    DWORD ent = *(DWORD*)(ADDR_ENTITY_ARRAY + (DWORD)i * 4);
+    DWORD hb;
+    int n, k;
+    float px, pz, ang, cs, sn;
+
+    if (!ent)
+      continue;
+    if (*(WORD*)(ent + ENT_OFF_INDEX) < ENT_FIRST_OBJECT)
+      continue;                          // players and enemies never block the camera
+    hb = *(DWORD*)(ent + ENT_OFF_HITBOX);
+    n = *(int*)(ent + ENT_OFF_HITBOX_N);
+    if (!hb || n <= 0 || n > 32)
+      continue;
+    px = *(float*)(ent + ENT_OFF_POS) - from->x;
+    pz = *(float*)(ent + ENT_OFF_POS + 8) - from->z;
+    if (px * px + pz * pz > DOOR_CULL * DOOR_CULL)
+      continue;
+
+    // The heading orients the panel; the client keeps each shape's world centre at +0x1C, rewritten every
+    // frame, so a door that slides open carries its box with it and needs no special case here.
+    ang = (float)(*(DWORD*)(ent + ENT_OFF_YROT) & 0xFFFF) * (2.0f * PI / 65536.0f);
+    cs = f_cos(ang);
+    sn = f_sin(ang);
+
+    for (k = 0; k < n; k++) {
+      DWORD box = hb + (DWORD)k * HB_STRIDE;
+      DWORD flags = *(DWORD*)(box + HB_OFF_FLAGS);
+      float hw, hd, lx0, lz0, lx1, lz1, ly0, ly1;
+      float tmin = 0.0f, tmax = 1.0f;
+      int axis;
+
+      if (*(DWORD*)(box + HB_OFF_SHAPE) != HB_SHAPE_BOX)
+        continue;                        // spheres here are interaction points, not barriers
+      if (!(flags & HB_FLAG_ON) || (flags & HB_FLAG_PASSABLE))
+        continue;
+
+      hw = *(float*)(box + HB_OFF_WIDTH);
+      hd = *(float*)(box + HB_OFF_DEPTH);
+      if (!(hw > 0.0f) || !(hd > 0.0f))
+        continue;
+
+      // Both ends of the segment in the panel's own frame: translate by its centre, then unrotate.
+      {
+        float ax = from->x - *(float*)(box + HB_OFF_WORLD);
+        float az = from->z - *(float*)(box + HB_OFF_WORLD + 8);
+        float bx = ex - *(float*)(box + HB_OFF_WORLD);
+        float bz = ez - *(float*)(box + HB_OFF_WORLD + 8);
+
+        lx0 = ax * cs - az * sn;
+        lz0 = ax * sn + az * cs;
+        lx1 = bx * cs - bz * sn;
+        lz1 = bx * sn + bz * cs;
+        ly0 = from->y - *(float*)(box + HB_OFF_WORLD + 4);
+        ly1 = ey - *(float*)(box + HB_OFF_WORLD + 4);
+      }
+
+      // Slab test on the three axes; tmin ends up as the fraction where the segment enters the box.
+      for (axis = 0; axis < 3; axis++) {
+        float a = (axis == 0) ? lx0 : (axis == 1) ? ly0 : lz0;
+        float b = (axis == 0) ? lx1 : (axis == 1) ? ly1 : lz1;
+        float half = (axis == 0) ? hw : (axis == 1) ? DOOR_HALF_HEIGHT : hd;
+        float d = b - a;
+        float t0, t1, tmp;
+
+        if (d > -0.0001f && d < 0.0001f) {
+          if (a < -half || a > half) {
+            tmax = -1.0f;                // parallel and outside this slab: no hit at all
+            break;
+          }
+          continue;
+        }
+        t0 = (-half - a) / d;
+        t1 = (half - a) / d;
+        if (t0 > t1) { tmp = t0; t0 = t1; t1 = tmp; }
+        if (t0 > tmin) tmin = t0;
+        if (t1 < tmax) tmax = t1;
+        if (tmin > tmax)
+          break;
+      }
+
+      if (tmax >= tmin && tmin > 0.0f && tmin < best) {
+        best = tmin;
+        if (!g_door_logged) {
+          float len = f_sqrt(dx * dx + dy * dy + dz * dz);
+
+          g_door_logged = 1;
+          rsc_log("door collision: panel %04X blocks the view at %d%% of %d units -- eye pulled in",
+                  (int)*(WORD*)(ent + ENT_OFF_INDEX), f_toint(tmin * 100.0f), f_toint(len));
+        }
+      }
+    }
+  }
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,6 +1853,26 @@ static void __cdecl on_camera_updated(void) {
         lead_z *= LEAD_MAX / len;
       }
     }
+    // ⭐ Doors and fences are invisible to the client's camera ray, so pull the eye in ourselves. Done on
+    // the written point only, exactly like the lead above, so nothing here feeds back into the held angle.
+    if (g_door_collision) {
+      float clear = door_clear_fraction(&anchor, anchor.x + nx + lead_x, anchor.y + ny, anchor.z + nz + lead_z);
+
+      if (clear < 1.0f) {
+        float want = f_sqrt((nx + lead_x) * (nx + lead_x) + (nz + lead_z) * (nz + lead_z));
+        float allowed = clear * want - DOOR_MARGIN;
+
+        if (allowed < DOOR_MIN_DIST)
+          allowed = DOOR_MIN_DIST;       // a camera sitting on the character cannot rotate at all
+        if (want > 0.0f && allowed < want) {
+          float k = allowed / want;
+
+          nx *= k; ny *= k; nz *= k;
+          lead_x *= k; lead_z *= k;
+        }
+      }
+    }
+
     src->x = anchor.x + nx + lead_x;
     src->y = anchor.y + ny;
     src->z = anchor.z + nz + lead_z;
@@ -1711,14 +1923,24 @@ static void __cdecl on_camera_updated(void) {
       float a0 = f_atan2(ex, ez);
       float a1 = f_atan2(nx, nz);
       float a;
+      vec3f want;
 
       g_snap_ramp += 1.0f / (float)g_snap_frames;
       if (g_snap_ramp > 1.0f) g_snap_ramp = 1.0f;
       a = a0 + wrap_angle(a1 - a0) * g_snap_ramp;
 
       // Distance and height stay exactly as the client left them.
-      eye->x = look->x + f_sin(a) * cur_h;
-      eye->z = look->z + f_cos(a) * cur_h;
+      want.x = look->x + f_sin(a) * cur_h;
+      want.y = eye->y;
+      want.z = look->z + f_cos(a) * cur_h;
+
+      // ⭐ ...and then the wall clamp the client is about to skip. See ADDR_MAP_RAY.
+      if (g_wall_collision)
+        clamp_eye_to_walls(look, &want);
+
+      eye->x = want.x;
+      eye->y = want.y;
+      eye->z = want.z;
     }
   } else {
     g_snap_ramp = 0.0f;                  // next engage eases in from wherever the camera has drifted
@@ -1786,13 +2008,13 @@ __declspec(dllexport) void __stdcall load(void) {
   if (patch_camera()) {
     static const char* const mode_name[2] = { "enabled", "disabled" };
     rsc_log("patched ok (call %08X -> hook) enabled=%d chasecam=%s sens=%d%% deadzone=%d%% pitch=%s "
-            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% clientpad=%d "
+            "invX=%d invY=%d speed=%d/%d@%d%% snap=%d/%df lerp=%d%% freeze=%d always=%d return=%ddeg/s yawlimit=%d recentre(trig=%d mask=%04X) suppress=%03X menus=%d orbithold=%d lagcomp=%d%% clientpad=%d doors=%d walls=%d "
             "xinput=%s%s",
             ADDR_UPDATE_CALL, g_enabled, mode_name[g_chase_mode], g_sensitivity, g_deadzone,
             g_allow_pitch ? "on" : "off",
             g_invert_x, g_invert_y, g_speed_slow, g_speed_fast, g_speed_split, g_snap_steering, g_snap_frames, g_camera_lerp,
             g_freeze_chase, g_always_engaged, g_return_speed, g_yaw_limit, g_recentre_trigger,
-            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp, g_client_pad,
+            g_recentre_mask, g_suppress, g_menu_guard, g_orbit_hold, g_lag_comp, g_client_pad, g_door_collision, g_wall_collision,
             g_xinput_get_state ? "ok" : "MISSING",
             RSC_DIAGNOSTIC ? "  [DIAGNOSTIC BUILD]" : "");
   } else {
