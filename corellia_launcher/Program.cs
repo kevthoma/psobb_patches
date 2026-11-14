@@ -143,7 +143,8 @@ namespace Corellia
 
         public static void ReadServer(string dir, out string host, out int port)
         {
-            host = "192.168.1.15"; port = 11000;
+            // Fallback only: every shipped psobb.cfg sets PatchHost/PatchPort explicitly.
+            host = "corellia.thekevops.net"; port = 11000;
             var p = Path.Combine(dir, "psobb.cfg");
             if (!File.Exists(p)) return;
             foreach (var raw in File.ReadAllLines(p))
